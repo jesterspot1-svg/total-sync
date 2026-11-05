@@ -70,6 +70,7 @@ export interface SyncState {
 export interface Scan {
   entries: Map<string, LocalEntry>;
   blocked: Set<string>;
+  ignored?: Set<string>;
   issues?: Set<ErrorCode>;
 }
 export interface LocalFiles {

@@ -250,7 +250,7 @@ export default class TotalSync extends Plugin {
 
   files(): ObsidianFiles {
     return new ObsidianFiles(this.app.vault, this.config.device, this.maxBytes, this.config.attachments,
-      prefixes(this.config.exclude), this.config.calendar);
+      prefixes(this.config.exclude), this.config.calendar, this.config.excalidraw);
   }
 
   private engine(files = this.files()): SyncEngine {
@@ -268,6 +268,7 @@ export default class TotalSync extends Plugin {
           ...(this.profile === 'windows' && this.config.desktop ? ['desktop-config' as const] : []),
         ],
         attachments: this.config.attachments, exclude: prefixes(this.config.exclude), calendar: this.config.calendar,
+        excalidraw: this.profile === 'windows' && this.config.excalidraw,
       },
     });
   }
@@ -278,6 +279,17 @@ export default class TotalSync extends Plugin {
 
   async history() {
     return this.operate(() => this.engine().history(this.state));
+  }
+
+  async acceptExcalidraw(): Promise<void> {
+    await this.operate(async () => {
+      const state = await this.engine().acceptExcalidraw(this.state);
+      await this.saveData({ binding: this.config.binding, device: this.config.device, state, lastSuccess: this.lastSuccess });
+      this.state = state;
+      this.record('excalidraw-profile-applied');
+      new Notice(t('Excalidraw preferences received. Reopen the vault if its settings panel is stale.',
+        'Настройки Excalidraw получены. Если настройки ещё не обновились, заново откройте хранилище.'));
+    });
   }
 
   async restore(id: string, original: boolean): Promise<void> {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3 · Test prerelease
+
+- Show catalog links and an optional batch of official Obsidian CLI commands for missing plugins on Windows.
+- Sync an opt-in, validated subset of Excalidraw 2.29.x preferences. Keep credentials, script permissions and unrelated settings local.
+- Allow the receiving Windows vault to accept the published Excalidraw profile on first setup. Update every TotalSync client to 0.1.3 before publishing this profile.
+
 ## 0.1.2 · Test prerelease
 
 - Probe whether the server supports exclusive WebDAV collection moves, including collisions with an empty legacy reservation and simultaneous moves.

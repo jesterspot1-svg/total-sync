@@ -2,13 +2,14 @@ import {
   channels, stamp, SyncError,
   type Channel, type LocalEntry, type Manifest, type RemoteEntry, type Scan, type SyncState,
 } from './model';
-import { isNote, pathKey } from './policy';
+import { CALENDAR_PROFILE, EXCALIDRAW_PROFILE, isNote, pathKey } from './policy';
 
 export interface Selection {
   channels: readonly Channel[];
   attachments: boolean;
   exclude: readonly string[];
   calendar?: boolean;
+  excalidraw?: boolean;
 }
 export type Action = 'push' | 'pull' | 'delete-remote' | 'delete-local' | 'conflict' | 'equal' | 'blocked';
 export interface Operation {
@@ -25,7 +26,8 @@ export interface Plan {
 }
 
 function selected(channel: Channel, path: string, selection: Selection, folder: boolean): boolean {
-  if (channel === 'desktop-config' && path === 'plugins/calendar/preferences.json') return !!selection.calendar;
+  if (channel === 'desktop-config' && path === CALENDAR_PROFILE) return !!selection.calendar;
+  if (channel === 'desktop-config' && path === EXCALIDRAW_PROFILE) return !!selection.excalidraw;
   if (channel !== 'content') return true;
   const alias = pathKey(path);
   return (folder || selection.attachments || isNote(path))
@@ -57,7 +59,7 @@ export function planSync(manifest: Manifest, state: SyncState, scans: ReadonlyMa
     let count = 0;
     let deletions = 0;
     for (const path of paths) {
-      if (!path) continue;
+      if (!path || scan.ignored?.has(path)) continue;
       const local = scan.entries.get(path);
       const remote = remoteGroup[path];
       const base = Object.prototype.hasOwnProperty.call(baseline, path) ? baseline[path] : undefined;
@@ -78,6 +80,9 @@ export function planSync(manifest: Manifest, state: SyncState, scans: ReadonlyMa
         else if (localChanged && remoteChanged) action = local || remote?.kind === 'file' || remote?.kind === 'folder' ? 'conflict' : 'equal';
         else if (localChanged) action = local ? 'push' : 'delete-remote';
         else if (remoteChanged) action = remote?.kind === 'deleted' ? local ? 'delete-local' : 'equal' : 'pull';
+      }
+      if (channel === 'desktop-config' && path === EXCALIDRAW_PROFILE && action === 'delete-remote' && remote?.kind === 'file') {
+        action = 'pull';
       }
       if (action === 'delete-local' || action === 'delete-remote') {
         if (scan.blocked.size > 0 || duplicates.size > 0 || (!selection.attachments && folder)) action = 'blocked';

@@ -3,7 +3,10 @@ import { test, type TestContext } from 'node:test';
 import { Client, DavServer } from './fixture';
 import { DAY, decode, encode, RETENTION, sha256, SyncError } from '../src/model';
 import { RemoteVault } from '../src/repository';
-import { checkPayload, inChannel, pathKey, portablePath } from '../src/policy';
+import {
+  catalogInstallCommand, checkPayload, EXCALIDRAW_ID, EXCALIDRAW_PROFILE, excalidrawPreferences,
+  inChannel, jsonBytes, mergePreferences, pathKey, portablePath,
+} from '../src/policy';
 import { MAIL, mailEndpoint, ROOT } from '../src/webdav';
 
 const fails = (code: string) => (error: unknown) => error instanceof SyncError && error.code === code;
@@ -520,4 +523,81 @@ test('a damaged ready record cannot publish an unconfirmed revision', async t =>
   assert.equal((await remote.head(null, true)).revision, previous);
   assert.equal(a.local.text('Checked.md'), 'known good');
   assert.equal(phone.local.text('Checked.md'), 'new draft');
+});
+
+test('Excalidraw profile contains portable values and leaves credentials and execution permissions local', () => {
+  const source = {
+    folder: 'Рисунки/Эскизы', width: '70%', embedType: 'SVG', pngExportScale: 2, isLeftHanded: true,
+    cropFolder: '../elsewhere', zoomMax: 10_000, enableOnloadScripts: true, startupScriptPath: 'Unsafe.md',
+    aiProviderProfiles: { Fake: { apiKey: 'synthetic-source-secret' } },
+    taskboneAPIkey: 'synthetic-source-ocr', scriptEngineSettings: { plugin: { token: 'synthetic' } },
+  };
+  const profile = excalidrawPreferences(source);
+  assert.deepEqual(profile, { folder: 'Рисунки/Эскизы', width: '70%', embedType: 'SVG', pngExportScale: 2, isLeftHanded: true });
+  checkPayload('desktop-config', EXCALIDRAW_PROFILE, jsonBytes(profile));
+  for (const extra of [{ taskboneAPIkey: 'never' }, { enableCommandLinks: true }, { folder: 'C:\\Other' }]) {
+    assert.throws(() => checkPayload('desktop-config', EXCALIDRAW_PROFILE, jsonBytes({ ...profile, ...extra })), fails('configuration'));
+  }
+  assert.throws(() => checkPayload('desktop-config', EXCALIDRAW_PROFILE, jsonBytes({})), fails('configuration'));
+  const existing = { width: '400', taskboneAPIkey: 'local-only', enableOnloadScripts: false, unknownSetting: { untouched: 1 } };
+  const merged = mergePreferences(existing, profile, excalidrawPreferences);
+  assert.deepEqual(excalidrawPreferences(merged), profile);
+  assert.equal(merged.taskboneAPIkey, 'local-only');
+  assert.equal(merged.enableOnloadScripts, false);
+  assert.deepEqual(merged.unknownSetting, { untouched: 1 });
+  assert.equal(inChannel('desktop-config', 'plugins/' + EXCALIDRAW_ID + '/main.js'), false);
+  assert.equal(inChannel('desktop-config', 'plugins/' + EXCALIDRAW_ID + '/data.json'), false);
+});
+
+test('destination accepts the source Excalidraw profile and syncs later changes', async t => {
+  const { server, id, mobile } = await setup(t);
+  const source = new Client(server, id, 'windows', undefined, false, true);
+  const destination = new Client(server, id, 'windows', undefined, false, true);
+  const channel = 'desktop-config';
+  source.local.put(EXCALIDRAW_PROFILE, '{"width":"700","isLeftHanded":true}', channel);
+  destination.local.put(EXCALIDRAW_PROFILE, '{"width":"400","isLeftHanded":false}', channel);
+  await source.run();
+  assert.equal((await destination.run()).counts.conflict, 1);
+  assert.equal(destination.local.text(EXCALIDRAW_PROFILE, channel), '{"width":"400","isLeftHanded":false}');
+  destination.state = await destination.engine.acceptExcalidraw(destination.state);
+  assert.equal(destination.local.text(EXCALIDRAW_PROFILE, channel), '{"width":"700","isLeftHanded":true}');
+  source.local.put(EXCALIDRAW_PROFILE, '{"width":"900","isLeftHanded":true}', channel);
+  await source.run();
+  assert.equal((await destination.run()).counts.pull, 1);
+  assert.equal(destination.local.text(EXCALIDRAW_PROFILE, channel), '{"width":"900","isLeftHanded":true}');
+  const offset = server.requests.length;
+  await mobile.run();
+  assert.equal(mobile.local.text(EXCALIDRAW_PROFILE, channel), undefined);
+  assert.equal(server.requests.slice(offset).some(row => row.path.includes('/desktop-config/')), false);
+  await assert.rejects(mobile.engine.acceptExcalidraw(mobile.state), fails('configuration'));
+});
+
+test('missing Excalidraw install does not create a plugin or remove its cloud profile', async t => {
+  const { server, id, remote } = await setup(t);
+  const source = new Client(server, id, 'windows', undefined, false, true);
+  const destination = new Client(server, id, 'windows', undefined, false, true);
+  const channel = 'desktop-config';
+  source.local.put(EXCALIDRAW_PROFILE, '{"width":"800"}', channel);
+  await source.run();
+  destination.local.ignored.set(channel, new Set([EXCALIDRAW_PROFILE]));
+  await destination.run();
+  assert.equal(destination.local.text(EXCALIDRAW_PROFILE, channel), undefined);
+  await assert.rejects(destination.engine.acceptExcalidraw(destination.state), fails('configuration'));
+  destination.local.ignored.delete(channel);
+  assert.equal((await destination.run()).counts.pull, 1);
+  destination.local.group(channel).delete(EXCALIDRAW_PROFILE);
+  assert.equal((await destination.run()).counts.pull, 1);
+  assert.equal((await remote.head(null)).manifest.files[channel][EXCALIDRAW_PROFILE]?.kind, 'file');
+});
+
+test('catalog install commands target the selected vault and cannot include shell tokens from plugin IDs', () => {
+  assert.equal(catalogInstallCommand('TotalSync Beta', EXCALIDRAW_ID, true),
+    "obsidian 'vault=TotalSync Beta' plugin:install id=obsidian-excalidraw-plugin enable");
+  assert.equal(catalogInstallCommand("Artist's notes", 'calendar', false),
+    "obsidian 'vault=Artist''s notes' plugin:install id=calendar");
+  for (const id of ['bad;command', 'bad id', '../folder', 'total-sync']) {
+    assert.equal(catalogInstallCommand('TotalSync Beta', id, true), undefined);
+  }
+  assert.equal(catalogInstallCommand('Unsafe\nName', 'calendar', false), undefined);
+  assert.equal(catalogInstallCommand('Unsafe’Name', 'calendar', false), undefined);
 });

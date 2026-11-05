@@ -3,6 +3,7 @@ import { errorText, t } from './i18n';
 import type TotalSync from './main';
 import { idPattern, type Channel, type Profile } from './model';
 import type { Action } from './planner';
+import { catalogInstallCommand } from './policy';
 import type { Options } from './settings';
 import { MAIL } from './webdav';
 
@@ -120,8 +121,8 @@ export async function showInventory(plugin: TotalSync): Promise<void> {
   const modal = new Modal(plugin.app);
   modal.setTitle(t('TotalSync plugin inventory', 'Инвентарь плагинов TotalSync'));
   modal.contentEl.createEl('p', { text: t(
-    'Open Settings → Community plugins → Browse. Search for the plugin and verify its ID. Install or update it there, then enable it if needed.',
-    'Откройте Настройки → Сторонние плагины → Обзор. Найдите плагин, сверьте ID, установите или обновите и при необходимости включите его.',
+    'Compare the source device with this vault. Install missing plugins from Obsidian’s Community catalog, individually or with the official CLI.',
+    'Сверьте список выбранного устройства с этим vault. Недостающие плагины можно установить из каталога Obsidian по одному или пакетом через штатный CLI.',
   ) });
   const own = new Map(result.own.map(item => [item.id, item]));
   if (!result.others.length) modal.contentEl.createEl('p', { text: t('No other device inventory yet.', 'Инвентарь с другого устройства ещё не получен.') });
@@ -132,9 +133,46 @@ export async function showInventory(plugin: TotalSync): Promise<void> {
     for (const item of remote.items) {
       const here = own.get(item.id);
       const local = here ? here.version + (here.enabled ? ' ✓' : '') : t('missing', 'отсутствует');
-      list.createEl('li', { text: item.id + ' · ' + item.version + (item.enabled ? ' ✓' : '') + ' → ' + local });
+      const row = list.createEl('li', { text: item.id + ' · ' + item.version + (item.enabled ? ' ✓' : '') + ' → ' + local });
+      if (!here) {
+        row.appendText(' · ');
+        row.createEl('a', { text: t('Open catalog', 'Открыть в каталоге'), href: 'https://community.obsidian.md/plugins/' + encodeURIComponent(item.id) });
+      }
+    }
+    const commands = remote.items.filter(item => !own.has(item.id))
+      .map(item => catalogInstallCommand(plugin.app.vault.getName(), item.id, item.enabled))
+      .filter((line): line is string => !!line);
+    if (commands.length) {
+      new Setting(modal.contentEl).addButton(btn => btn
+        .setButtonText(t('Review install commands', 'Команды для установки'))
+        .onClick(() => showInstallCommands(plugin.app, commands)));
     }
   }
+  modal.open();
+}
+
+function showInstallCommands(app: App, commands: readonly string[]): void {
+  const modal = new Modal(app);
+  const title = t('Install missing plugins', 'Установка недостающих плагинов');
+  modal.setTitle(title);
+  modal.contentEl.createEl('p', { text: t(
+    'Check the vault name and plugin IDs. Run the selected lines in PowerShell with Obsidian CLI configured. A line ending in enable also enables that plugin.',
+    'Проверьте имя vault и ID. Запустите выбранные строки в PowerShell с настроенным Obsidian CLI. Строки с enable также включат плагин.',
+  ) });
+  const area = modal.contentEl.createEl('textarea', { attr: { readonly: '', rows: '8', 'aria-label': title } });
+  area.style.width = '100%';
+  area.value = commands.join('\n');
+  modal.contentEl.createEl('a', { text: t('Obsidian CLI instructions', 'Настройка Obsidian CLI'), href: 'https://obsidian.md/help/cli' });
+  new Setting(modal.contentEl).addButton(btn => btn
+    .setButtonText(t('Copy commands', 'Скопировать команды')).onClick(async () => {
+      try {
+        await navigator.clipboard.writeText(area.value);
+        new Notice(t('Commands copied.', 'Команды скопированы.'));
+      } catch {
+        area.select();
+        new Notice(t('Copy the selected text.', 'Скопируйте выделенный текст.'));
+      }
+    }));
   modal.open();
 }
 
@@ -268,6 +306,16 @@ export class SettingsTab extends PluginSettingTab {
         ['Allowed vault settings, styles and plugin inventory.', 'Разрешённые настройки vault, стили и инвентарь плагинов.']);
       this.toggle('calendar', 'Calendar preferences', 'Настройки Calendar',
         ['Syncs a small allowlist of typed preferences. Enable on each Windows client.', 'Синхронизирует небольшой перечень проверяемых параметров. Включите на каждом Windows-клиенте.']);
+      this.toggle('excalidraw', 'Excalidraw preferences', 'Настройки Excalidraw',
+        ['Update TotalSync on every device first. Syncs approved preferences of an installed Excalidraw 2.29.x.',
+          'Сначала обновите TotalSync на всех устройствах. Переносит проверенные настройки установленного Excalidraw 2.29.x.']);
+      new Setting(el).addButton(btn => btn
+        .setButtonText(t('Accept cloud Excalidraw preferences', 'Принять настройки Excalidraw из облака'))
+        .onClick(() => confirm(plugin.app,
+          t('Use the cloud Excalidraw profile', 'Применить облачный профиль Excalidraw'),
+          t('The cloud profile replaces the synchronized preferences. The previous portable settings are backed up locally.',
+            'Профиль из облака заменит синхронизируемые параметры. Предыдущие переносимые настройки сохранятся в локальной копии.'),
+          t('Apply profile', 'Применить профиль'), () => plugin.acceptExcalidraw())));
       new Setting(el).addButton(btn => btn.setButtonText(t('Compare installed plugins', 'Сравнить установленные плагины')).onClick(() => showInventory(plugin)));
     }
     new Setting(el).setName(t('Excluded content paths', 'Исключённые пути контента'))

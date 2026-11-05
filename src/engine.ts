@@ -3,7 +3,7 @@ import {
   type Channel, type Checkpoint, type HistoryItem, type LocalEntry, type LocalFiles,
   type Manifest, type RemoteEntry, type RemoteFile, type Scan, type SyncState, type Profile,
 } from './model';
-import { checkPayload, pathKey } from './policy';
+import { checkPayload, EXCALIDRAW_PROFILE, pathKey } from './policy';
 import { planSync, type Action, type Operation, type Plan, type Selection } from './planner';
 import { RemoteVault, type Head } from './repository';
 
@@ -358,6 +358,25 @@ export class SyncEngine {
       const head = await this.remote.head(state.checkpoint);
       return head.manifest.history.filter(item => this.options.selection.channels.includes(item.channel))
         .sort((a, b) => b.at - a.at);
+    });
+  }
+
+  acceptExcalidraw(state: SyncState): Promise<SyncState> {
+    return this.exclusive(async () => {
+      const channel = 'desktop-config';
+      const path = EXCALIDRAW_PROFILE;
+      if (!this.options.selection.excalidraw || !this.options.selection.channels.includes(channel)) {
+        throw new SyncError('configuration');
+      }
+      const head = await this.remote.head(state.checkpoint, true);
+      const remote = head.manifest.files[channel][path];
+      if (remote?.kind !== 'file') throw new SyncError('missing');
+      const scan = await this.local.scan(channel);
+      if (scan.ignored?.has(path) || scan.blocked.has(path)) throw new SyncError('configuration');
+      await this.pull({ action: 'pull', channel, path, local: scan.entries.get(path), remote }, remote);
+      const next = copyState(state, head);
+      next.base[channel][path] = { local: stamp(remote), remote: stamp(remote) };
+      return next;
     });
   }
 

@@ -11,6 +11,7 @@ export interface Options {
   desktop: boolean;
   bookmarks: boolean;
   calendar: boolean;
+  excalidraw: boolean;
   startup: boolean;
   change: boolean;
   debounce: number;
@@ -40,6 +41,7 @@ export function options(data: unknown): Options {
     binding, device: typeof stored.device === 'string' && idPattern.test(stored.device) ? stored.device : crypto.randomUUID(),
     enabled: bool('enabled', false), content: bool('content', true), attachments: bool('attachments', true),
     desktop: bool('desktop', true), bookmarks: bool('bookmarks', false), calendar: bool('calendar', false),
+    excalidraw: bool('excalidraw', false),
     startup: bool('startup', true), change: bool('change', true),
     debounce: integer('debounce', 5, 1, 3600), interval: integer('interval', 5, 0, 1440),
     retry: integer('retry', 10, 3, 300), exclude,

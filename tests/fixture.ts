@@ -141,6 +141,7 @@ export class DavServer {
 export class MemoryVault implements LocalFiles {
   readonly data = new Map<Channel, Map<string, ArrayBuffer | 'folder'>>();
   readonly blocked = new Map<Channel, Set<string>>();
+  readonly ignored = new Map<Channel, Set<string>>();
   readonly applied: string[] = [];
   failNextPath = '';
 
@@ -174,7 +175,7 @@ export class MemoryVault implements LocalFiles {
       if (blocked.has(path)) continue;
       entries.set(path, data === 'folder' ? { kind: 'folder' } : { kind: 'file', size: data.byteLength, hash: await sha256(data) });
     }
-    return { entries, blocked };
+    return { entries, blocked, ignored: this.ignored.get(channel) };
   }
 
   async read(channel: Channel, path: string): Promise<ArrayBuffer> {
@@ -210,12 +211,15 @@ export class Client {
   engine: SyncEngine;
   readonly device = crypto.randomUUID();
 
-  constructor(server: DavServer, id: string, profile: Profile = 'windows', maxBytes = 8 * 1024 * 1024, exclusiveMove = false) {
+  constructor(
+    server: DavServer, id: string, profile: Profile = 'windows', maxBytes = 8 * 1024 * 1024,
+    exclusiveMove = false, excalidraw = false,
+  ) {
     const remote = new RemoteVault(server.dav(), id, exclusiveMove);
     this.engine = new SyncEngine(remote, this.local, {
       device: this.device, profile, maxBytes, active: () => true, now: () => server.clock,
       selection: { channels: profile === 'windows' ? ['content', 'desktop-config', 'shared-state'] : ['content', 'shared-state'],
-        attachments: true, exclude: [], calendar: true },
+        attachments: true, exclude: [], calendar: true, excalidraw },
     });
   }
 

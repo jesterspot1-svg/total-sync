@@ -3,9 +3,11 @@ import {
   channels, decode, object, parse, sha256, stamp, SyncError,
   type Channel, type HistoryItem, type LocalEntry, type LocalFiles, type Scan, type Stamp,
 } from './model';
-import { calendarPreferences, checkPayload, inChannel, isNote, jsonBytes, pathKey, portablePath, safePluginId, safeVersion } from './policy';
+import {
+  CALENDAR_PROFILE, EXCALIDRAW_ID, EXCALIDRAW_PROFILE, checkPayload, inChannel, isNote, jsonBytes,
+  mergePreferences, pathKey, portablePath, preferenceProjector, safePluginId, safeVersion,
+} from './policy';
 
-const calendar = 'plugins/calendar/preferences.json';
 const recovery = 'TotalSync-Recovery';
 const maxConfig = 2 * 1024 * 1024;
 const inventoryPattern = /^inventory\//;
@@ -19,7 +21,7 @@ export class ObsidianFiles implements LocalFiles {
   constructor(
     private readonly vault: Vault, private readonly device: string, private readonly maxBytes: number,
     private readonly attachments: boolean, private readonly exclude: readonly string[],
-    private readonly preferences: boolean,
+    private readonly preferences: boolean, private readonly excalidraw: boolean,
   ) {
     this.adapter = vault.adapter;
     this.base = vault.configDir + '/plugins/total-sync/local';
@@ -47,7 +49,7 @@ export class ObsidianFiles implements LocalFiles {
       return path;
     }
     if (channel === 'shared-state' || inventoryPattern.test(path)) return this.base + '/' + path;
-    if (path === calendar) return this.vault.configDir + '/plugins/calendar/data.json';
+    if (preferenceProjector(path)) return this.vault.configDir + '/' + path.replace(/preferences\.json$/, 'data.json');
     return this.vault.configDir + '/' + path;
   }
 
@@ -128,8 +130,15 @@ export class ObsidianFiles implements LocalFiles {
     for (const theme of themes) {
       for (const path of await this.listFiles(theme)) this.add(scan, 'desktop-config', path.slice(config.length + 1), path, false);
     }
-    if (this.preferences && await this.adapter.exists(this.path('desktop-config', calendar))) {
-      this.add(scan, 'desktop-config', calendar, this.path('desktop-config', calendar), false);
+    if (this.preferences && await this.adapter.exists(this.path('desktop-config', CALENDAR_PROFILE))) {
+      this.add(scan, 'desktop-config', CALENDAR_PROFILE, this.path('desktop-config', CALENDAR_PROFILE), false);
+    }
+    if (this.excalidraw) {
+      if (!await this.hasCompatibleExcalidraw()) scan.ignored?.add(EXCALIDRAW_PROFILE);
+      else {
+        const file = this.path('desktop-config', EXCALIDRAW_PROFILE);
+        if (await this.adapter.exists(file)) this.add(scan, 'desktop-config', EXCALIDRAW_PROFILE, file, false);
+      }
     }
     for (const path of await this.listFiles(this.base + '/inventory')) {
       this.add(scan, 'desktop-config', path.slice(this.base.length + 1), path, false);
@@ -139,7 +148,7 @@ export class ObsidianFiles implements LocalFiles {
   }
 
   async scan(channel: Channel): Promise<Scan> {
-    const scan: Scan = { entries: new Map(), blocked: new Set(), issues: new Set() };
+    const scan: Scan = { entries: new Map(), blocked: new Set(), issues: new Set(), ignored: new Set() };
     this.actual.get(channel)?.clear();
     if (channel === 'content') {
       for (const file of this.vault.getAllLoadedFiles()) {
@@ -177,8 +186,26 @@ export class ObsidianFiles implements LocalFiles {
       return this.vault.readBinary(file);
     }
     const bytes = await this.adapter.readBinary(full);
-    if (channel === 'desktop-config' && path === calendar) return jsonBytes(calendarPreferences(parse(bytes)));
+    const project = channel === 'desktop-config' ? preferenceProjector(path) : undefined;
+    if (project) {
+      const raw = parse(bytes);
+      if (!object(raw)) throw new SyncError('configuration');
+      return jsonBytes(project(raw));
+    }
     return bytes;
+  }
+
+  private async hasCompatibleExcalidraw(): Promise<boolean> {
+    const path = this.vault.configDir + '/plugins/' + EXCALIDRAW_ID + '/manifest.json';
+    const stat = await this.adapter.stat(path);
+    if (!stat || stat.type !== 'file' || stat.size > maxConfig) return false;
+    try {
+      const manifest = parse(await this.adapter.readBinary(path));
+      return object(manifest) && manifest.id === EXCALIDRAW_ID
+        && typeof manifest.version === 'string' && /^2\.29\.\d+$/.test(manifest.version);
+    } catch {
+      return false;
+    }
   }
 
   private async createParents(full: string, content: boolean): Promise<void> {
@@ -207,8 +234,7 @@ export class ObsidianFiles implements LocalFiles {
     if (await this.current(channel, path) !== expected) throw new SyncError('changed');
   }
 
-  private async backup(full: string): Promise<void> {
-    const bytes = await this.adapter.readBinary(full);
+  private async backup(bytes: ArrayBuffer): Promise<void> {
     const hash = await sha256(bytes);
     const path = this.base + '/backups/' + hash + '.bin';
     await this.createParents(path, false);
@@ -219,18 +245,13 @@ export class ObsidianFiles implements LocalFiles {
   private async writeConfig(channel: Channel, path: string, full: string, bytes: ArrayBuffer, expected: Stamp): Promise<void> {
     const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
     let output = bytes;
-    const calendarFile = channel === 'desktop-config' && path === calendar;
+    const project = channel === 'desktop-config' ? preferenceProjector(path) : undefined;
     if (expected?.startsWith('file:')) {
       const original = await this.adapter.readBinary(full);
-      const existing = calendarFile ? parse(original) : null;
-      const projection = calendarFile ? jsonBytes(calendarPreferences(existing)) : original;
+      const existing = project ? parse(original) : null;
+      const projection = project ? jsonBytes(project(existing)) : original;
       if ('file:' + await sha256(projection) !== expected) throw new SyncError('changed');
-      if (calendarFile) {
-        if (!object(existing)) throw new SyncError('configuration');
-        const merged = { ...existing };
-        for (const key of Object.keys(calendarPreferences(existing))) delete merged[key];
-        output = jsonBytes({ ...merged, ...calendarPreferences(parse(bytes)) });
-      }
+      if (project) output = jsonBytes(mergePreferences(existing, parse(bytes), project));
       const before = utf8.decode(original);
       const after = utf8.decode(output);
       await this.adapter.process(full, text => {
@@ -249,12 +270,18 @@ export class ObsidianFiles implements LocalFiles {
 
   async apply(channel: Channel, path: string, expected: Stamp, next: LocalEntry | null, bytes?: ArrayBuffer): Promise<void> {
     const full = this.path(channel, path);
-    if (channel === 'desktop-config' && path === calendar && !this.preferences) throw new SyncError('configuration');
+    if (channel === 'desktop-config' && path === CALENDAR_PROFILE && !this.preferences) throw new SyncError('configuration');
+    if (channel === 'desktop-config' && path === EXCALIDRAW_PROFILE
+      && (!this.excalidraw || !await this.hasCompatibleExcalidraw())) throw new SyncError('configuration');
     if (bytes) checkPayload(channel, path, bytes);
     const actual = await this.current(channel, path);
     if (actual === stamp(next)) return;
     if (actual !== expected) throw new SyncError('changed');
-    if (actual?.startsWith('file:')) await this.backup(full);
+    if (actual?.startsWith('file:')) {
+      const previous = channel === 'desktop-config' && path === EXCALIDRAW_PROFILE
+        ? await this.read(channel, path) : await this.adapter.readBinary(full);
+      await this.backup(previous);
+    }
     await this.createParents(full, channel === 'content');
     if (actual !== await this.current(channel, path)) throw new SyncError('changed');
     if (channel === 'content') {
@@ -290,7 +317,7 @@ export class ObsidianFiles implements LocalFiles {
     } else if (bytes) {
       await this.writeConfig(channel, path, full, bytes, actual);
     } else if (actual?.startsWith('file:')) {
-      if (channel === 'desktop-config' && path === calendar) throw new SyncError('configuration');
+      if (channel === 'desktop-config' && preferenceProjector(path)) throw new SyncError('configuration');
       await this.adapter.remove(full);
     }
     if (await this.current(channel, path) !== stamp(next)) throw new SyncError('local');
