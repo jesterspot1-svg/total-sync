@@ -1,0 +1,10 @@
+{
+  "id": "total-sync",
+  "name": "TotalSync",
+  "version": "0.1.0",
+  "minAppVersion": "1.11.5",
+  "description": "Sync notes, attachments and selected vault settings with Mail Cloud WebDAV.",
+  "author": "jesterspot1-svg",
+  "authorUrl": "https://github.com/jesterspot1-svg",
+  "isDesktopOnly": false
+}

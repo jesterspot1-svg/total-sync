@@ -1,0 +1,31 @@
+name: Release build
+on:
+  push:
+    tags:
+      - '*.*.*'
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - name: Verify release tag
+        run: node -e 'const v = require("./manifest.json").version; if (v !== process.env.GITHUB_REF_NAME) process.exit(1)'
+      - name: Generate SHA-256
+        working-directory: dist
+        run: sha256sum main.js manifest.json > SHA256SUMS.txt
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: total-sync-release
+          path: |
+            dist/main.js
+            dist/manifest.json
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
