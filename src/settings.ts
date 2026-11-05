@@ -6,6 +6,7 @@ export interface Options {
   binding: string;
   device: string;
   enabled: boolean;
+  ribbonButton: boolean;
   content: boolean;
   attachments: boolean;
   desktop: boolean;
@@ -39,7 +40,8 @@ export function options(data: unknown): Options {
   return {
     exclusiveMove: bool('exclusiveMove', false),
     binding, device: typeof stored.device === 'string' && idPattern.test(stored.device) ? stored.device : crypto.randomUUID(),
-    enabled: bool('enabled', false), content: bool('content', true), attachments: bool('attachments', true),
+    enabled: bool('enabled', false), ribbonButton: bool('ribbonButton', false),
+    content: bool('content', true), attachments: bool('attachments', true),
     desktop: bool('desktop', true), bookmarks: bool('bookmarks', false), calendar: bool('calendar', false),
     excalidraw: bool('excalidraw', false),
     startup: bool('startup', true), change: bool('change', true),

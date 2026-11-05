@@ -290,6 +290,10 @@ export class SettingsTab extends PluginSettingTab {
     new Setting(el).setName(t('Sync', 'Синхронизация')).setHeading();
     this.toggle('enabled', 'Enable sync', 'Включить синхронизацию',
       ['Review the plan before enabling. Use a separate synthetic test vault.', 'Перед включением проверьте план. Используйте отдельное хранилище с искусственными данными.']);
+    if (plugin.profile !== 'mobile') {
+      this.toggle('ribbonButton', 'Sync button in the ribbon', 'Кнопка синхронизации в левой панели',
+        ['Adds a shortcut to run sync now.', 'Добавляет кнопку для ручного запуска.']);
+    }
     const status = new Setting(el).setName(t('Status', 'Состояние'));
     new Setting(el).addButton(btn => btn.setButtonText(t('Sync now', 'Синхронизировать сейчас')).onClick(() => plugin.sync(true)))
       .addButton(btn => btn.setButtonText(t('Show sync plan', 'Показать план операций')).onClick(() => showPlan(plugin)));

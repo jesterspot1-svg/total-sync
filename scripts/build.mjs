@@ -21,4 +21,5 @@ if (externalImports.some(entry => entry.path !== 'obsidian')) {
   throw new Error('Unexpected external runtime import');
 }
 await copyFile('manifest.json', 'dist/manifest.json');
+await copyFile('styles.css', 'dist/styles.css');
 await writeFile('dist/metafile.json', JSON.stringify(result.metafile));

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4 · Test prerelease
+
+- Add an optional desktop ribbon button for manual synchronization.
+- Show a bottom-right progress badge while sync is active, with a short success message or a specific error afterward.
+- Use Obsidian theme colors, safe-area spacing and the system reduced-motion preference. Release assets now include `styles.css`.
+
 ## 0.1.3 · Test prerelease
 
 - Show catalog links and an optional batch of official Obsidian CLI commands for missing plugins on Windows.

@@ -12,6 +12,7 @@ assert.equal(manifest.version, pkg.version);
 assert.equal(versions[manifest.version], manifest.minAppVersion);
 assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
 assert.equal(read('dist/manifest.json'), read('manifest.json'));
+assert.equal(read('dist/styles.css'), read('styles.css'));
 assert.deepEqual(pkg.dependencies ?? {}, {});
 
 const bundle = read('dist/main.js');
@@ -28,7 +29,7 @@ const secret = new RegExp([
   '-----BEGIN (?:[A-Z0-9 ]+ )?' + 'PRIVATE KEY-----',
   'https?://[^\\s/:"<>]+:[^\\s/@"<>]+@',
 ].join('|'));
-for (const path of new Set([...files, 'dist/main.js', 'dist/manifest.json'])) {
+for (const path of new Set([...files, 'dist/main.js', 'dist/manifest.json', 'dist/styles.css'])) {
   assert.doesNotMatch(path, /(?:^|\/)(?:\.obsidian[^/]*|data\.json|\.env[^/]*|\.npmrc)(?:\/|$)|\.(?:pem|key|pfx|p12|har|zip|7z|log)$/i);
   if (/\.(?:png|jpe?g|webp)$/i.test(path)) continue;
   if (secret.test(read(path))) throw new Error('Potential secret in tracked file: ' + path);

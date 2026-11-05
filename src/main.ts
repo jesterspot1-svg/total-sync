@@ -6,6 +6,7 @@ import { idPattern, newState, object, SyncError, type Manifest, type Profile, ty
 import { ObsidianFiles } from './obsidian-files';
 import { RemoteVault } from './repository';
 import { options, prefixes, type Options } from './settings';
+import { SyncFeedback } from './sync-feedback';
 import { SettingsTab, showHistory, showPlan, showInventory } from './ui';
 import { collectionResponse, MAIL, mailEndpoint, WebDav, type Transport } from './webdav';
 
@@ -41,6 +42,8 @@ export default class TotalSync extends Plugin {
   private retryTimer?: Timer;
   private retryCount = 0;
   private changedWhileWorking = false;
+  private feedback?: SyncFeedback;
+  private ribbon?: HTMLElement;
 
   async onload(): Promise<void> {
     this.suspended = Platform.isMobile && document.hidden;
@@ -105,6 +108,8 @@ export default class TotalSync extends Plugin {
     });
     this.app.workspace.onLayoutReady(() => {
       if (this.stopped) return;
+      this.feedback = new SyncFeedback(document.body, Platform.isMobile);
+      this.updateRibbon();
       this.configureTimer();
       if (this.config.startup && this.allowed()) void this.sync(false);
     });
@@ -115,6 +120,9 @@ export default class TotalSync extends Plugin {
     window.clearTimeout(this.debounceTimer);
     window.clearTimeout(this.retryTimer);
     window.clearInterval(this.periodicTimer);
+    this.feedback?.dispose();
+    this.feedback = undefined;
+    this.ribbon?.remove();
   }
 
   private claim(binding: string): void {
@@ -205,7 +213,18 @@ export default class TotalSync extends Plugin {
     const value = options({ ...this.config, ...change });
     this.app.saveLocalStorage(storageKey, value);
     this.config = value;
+    this.updateRibbon();
     this.configureTimer();
+  }
+
+  private updateRibbon(): void {
+    if (Platform.isMobile || !this.feedback) return;
+    if (this.config.ribbonButton && !this.ribbon) {
+      this.ribbon = this.addRibbonIcon('refresh-cw', t('TotalSync: Sync now', 'TotalSync: Синхронизировать сейчас'),
+        () => { void this.sync(true); });
+      this.ribbon.addClass('total-sync-ribbon');
+    }
+    if (this.ribbon) this.ribbon.hidden = !this.config.ribbonButton;
   }
 
   private allowed(): boolean {
@@ -313,14 +332,15 @@ export default class TotalSync extends Plugin {
 
   async sync(manual: boolean, approval?: string): Promise<void> {
     if (!this.allowed()) {
-      if (manual) new Notice(errorText(this.stateError ? 'integrity' : 'inactive'));
+      if (manual) this.showSyncError(this.stateError ? 'integrity' : 'inactive');
       return;
     }
     if (this.working) {
-      if (manual) new Notice(errorText('busy'));
+      if (manual && !this.feedback?.running) new Notice(errorText('busy'));
       return;
     }
-    await this.operate(async () => {
+    this.feedback?.start();
+    const outcome = await this.operate(async () => {
       const result = await this.engine().run(this.state, approval);
       const complete = result.counts.blocked === 0 && result.errors.length === 0;
       const lastSuccess = complete ? Date.now() : this.lastSuccess;
@@ -339,10 +359,32 @@ export default class TotalSync extends Plugin {
       }
       if (n.conflict) new Notice(t('TotalSync saved conflicting versions. Check conflict copies and history.', 'TotalSync сохранил конфликтующие версии. Проверьте копии и историю.'));
       if (result.desktopChanged) new Notice(t('Desktop settings changed. Close and reopen the vault to apply them.', 'Настройки Windows изменились. Закройте и заново откройте хранилище для их применения.'));
-      if (manual) new Notice(complete
-        ? t('TotalSync finished.', 'TotalSync завершил синхронизацию.')
-        : errorText(this.currentError ?? 'local'));
-    }, manual, true);
+      return {
+        error: complete ? null : this.currentError,
+        changed: n.push + n.pull + n['delete-local'] + n['delete-remote'] + n.conflict > 0,
+      };
+    }, false, true);
+    if (this.stopped) return;
+    if (this.suspended) {
+      this.feedback?.clear();
+      return;
+    }
+    const error = outcome ? outcome.error : this.currentError ?? 'local';
+    if (error) {
+      this.showSyncError(error);
+    } else if (manual || outcome?.changed) {
+      const message = t('Sync complete', 'Синхронизация завершена');
+      if (this.feedback) this.feedback.finish('success', message);
+      else new Notice(message);
+    } else {
+      this.feedback?.clear();
+    }
+  }
+
+  private showSyncError(code: SyncError['code']): void {
+    const message = errorText(code);
+    if (this.feedback) this.feedback.finish('error', message);
+    else new Notice(message);
   }
 
   async operate<T>(action: () => Promise<T>, notify = true, retry = false): Promise<T | undefined> {
@@ -359,7 +401,7 @@ export default class TotalSync extends Plugin {
       const failure = error instanceof SyncError ? error : new SyncError('local');
       this.currentError = failure.code;
       this.record(failure.code, failure.status);
-      if (notify || failure.code === 'mass-delete') new Notice(errorText(failure.code));
+      if (notify) new Notice(errorText(failure.code));
       if (retry) this.retryAfterFailure(failure.code);
       return undefined;
     } finally {
