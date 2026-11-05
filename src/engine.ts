@@ -27,6 +27,14 @@ export interface Result {
   desktopChanged: boolean;
 }
 
+type Inspection = Preview & { scans: Map<Channel, Scan> };
+type CloudWork = {
+  head: Head;
+  failed: Set<Operation>;
+  conflicts: Map<Operation, { path: string; file: RemoteFile }>;
+  unsafeDelete: Set<Channel>;
+};
+
 function ordered(ops: Operation[]): Operation[] {
   const order = (op: Operation) => op.action.startsWith('delete') ? 2
     : (op.local?.kind === 'folder' || op.remote?.kind === 'folder') ? 0 : 1;
@@ -84,7 +92,7 @@ export class SyncEngine {
     }
   }
 
-  private async inspect(state: SyncState, head: Head): Promise<Preview & { scans: Map<Channel, Scan> }> {
+  private async inspect(state: SyncState, head: Head): Promise<Inspection> {
     const scans = new Map<Channel, Scan>();
     for (const channel of this.options.selection.channels) {
       this.active();
@@ -97,16 +105,41 @@ export class SyncEngine {
   }
 
   preview(state: SyncState): Promise<Preview> {
-    return this.exclusive(async () => this.inspect(state, await this.remote.head(state.checkpoint)));
+    return this.exclusive(async () => this.inspect(state, await this.remote.head(state.checkpoint, true)));
   }
 
   run(state: SyncState, approval?: string): Promise<Result> {
-    return this.exclusive(() => this.remote.lock(async () => {
-      const head = await this.remote.head(state.checkpoint);
+    return this.exclusive(async () => {
+      const head = await this.remote.head(state.checkpoint, true);
       const preview = await this.inspect(state, head);
       if (preview.plan.requiresApproval && preview.approval !== approval) throw new SyncError('mass-delete');
-      return this.execute(state, head, preview);
-    }));
+      const ops = ordered(preview.plan.operations);
+      const errors: Result['errors'] = [...new Set([...preview.scans.values()].flatMap(scan => [...scan.issues ?? []]))];
+      const now = this.now();
+      const expiration = this.expiration(now);
+      const needsLock = head.pending || head.manifest.devices[this.options.device] !== this.options.profile
+        || ops.some(op => op.action === 'push' || op.action.startsWith('delete') || (op.action === 'conflict' && !!op.local))
+        || head.manifest.garbage.length > 0
+        || (expiration !== null && head.manifest.history.some(item => item.at <= expiration));
+      const cloud: CloudWork = { head, failed: new Set(), conflicts: new Map(), unsafeDelete: new Set() };
+      let readOnly = false;
+      if (needsLock) {
+        try {
+          this.active();
+          await this.remote.lock(async () => {
+            const current = await this.remote.head(head);
+            if (current.hash !== head.hash) throw new SyncError('cloud-advanced');
+            // Read the manifest under the lock before modifying it. Keep the preview snapshot intact.
+            cloud.head = await this.commit(current, preview, ops, cloud, errors, now);
+          });
+        } catch (error) {
+          if (!(error instanceof SyncError) || error.code !== 'cloud-lock') throw error;
+          readOnly = true;
+          errors.unshift(error.code);
+        }
+      }
+      return this.apply(state, preview, ops, cloud, errors, readOnly);
+    });
   }
 
   private archive(manifest: Manifest, op: Operation, file: RemoteFile, reason: HistoryItem['reason'], now: number): void {
@@ -151,10 +184,14 @@ export class SyncEngine {
     }
   }
 
-  private prune(manifest: Manifest, now: number): boolean {
+  private expiration(now: number): number | null {
     const serverTime = this.remote.serverTime;
-    if (serverTime === null || Math.abs(serverTime - now) > 5 * 60_000) return false;
-    const expiresBefore = Math.min(now, serverTime) - RETENTION;
+    return serverTime === null || Math.abs(serverTime - now) > 5 * 60_000 ? null : Math.min(now, serverTime) - RETENTION;
+  }
+
+  private prune(manifest: Manifest, now: number): boolean {
+    const expiresBefore = this.expiration(now);
+    if (expiresBefore === null) return false;
     const expired = manifest.history.filter(item => item.at <= expiresBefore).slice(0, 64);
     if (!expired.length) return false;
     const expiredIds = new Set(expired.map(item => item.id));
@@ -175,16 +212,11 @@ export class SyncEngine {
     return true;
   }
 
-  private async execute(
-    state: SyncState, head: Head, preview: Preview & { scans: Map<Channel, Scan> },
-  ): Promise<Result> {
+  private async commit(
+    head: Head, preview: Inspection, deferred: Operation[], work: CloudWork, errors: Result['errors'], now: number,
+  ): Promise<Head> {
     const manifest = head.manifest;
-    const now = this.now();
-    const counts: Result['counts'] = { push: 0, pull: 0, 'delete-remote': 0, 'delete-local': 0, conflict: 0, equal: 0, blocked: 0 };
-    const errors: Result['errors'] = [...new Set([...preview.scans.values()].flatMap(scan => [...scan.issues ?? []]))];
-    const failed = new Set<Operation>();
-    const conflicts = new Map<Operation, { path: string; file: RemoteFile }>();
-    const deferred = ordered(preview.plan.operations);
+    const { failed, conflicts, unsafeDelete } = work;
     const aliases = new Map<string, string>();
     for (const path of Object.keys(manifest.files.content)) aliases.set(pathKey(path), path);
     for (const path of preview.scans.get('content')?.entries.keys() ?? []) aliases.set(pathKey(path), path);
@@ -231,7 +263,7 @@ export class SyncEngine {
       }
     }
 
-    const unsafeDelete = new Set([...failed, ...deferred.filter(op => op.action === 'blocked')].map(op => op.channel));
+    for (const op of deferred) if (failed.has(op) || op.action === 'blocked') unsafeDelete.add(op.channel);
     for (const op of deferred) {
       if (op.action !== 'delete-remote') continue;
       if (unsafeDelete.has(op.channel)) continue;
@@ -265,13 +297,23 @@ export class SyncEngine {
     dirty = this.prune(manifest, now) || dirty || garbage.length > 0;
     this.active();
     if (dirty) manifest.at = now;
-    const latest = dirty ? await this.remote.publish(manifest, head) : head;
-    const next = copyState(state, latest);
+    return dirty ? this.remote.publish(manifest, head) : head;
+  }
+
+  private async apply(
+    state: SyncState, preview: Inspection, deferred: Operation[], work: CloudWork,
+    errors: Result['errors'], readOnly: boolean,
+  ): Promise<Result> {
+    const { head, failed, conflicts, unsafeDelete } = work;
+    const manifest = head.manifest;
+    const counts: Result['counts'] = { push: 0, pull: 0, 'delete-remote': 0, 'delete-local': 0, conflict: 0, equal: 0, blocked: 0 };
+    const next = copyState(state, head);
     let desktopChanged = false;
 
     for (const op of deferred) {
       this.active();
-      if (op.action === 'blocked' || failed.has(op)) {
+      if (op.action === 'blocked' || failed.has(op)
+        || (readOnly && op.action !== 'equal' && op.action !== 'pull')) {
         counts.blocked++;
         continue;
       }

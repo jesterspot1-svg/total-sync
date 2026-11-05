@@ -4,7 +4,7 @@ import { Client, DavServer } from './fixture';
 import { DAY, decode, encode, RETENTION, sha256, SyncError } from '../src/model';
 import { RemoteVault } from '../src/repository';
 import { checkPayload, inChannel, pathKey, portablePath } from '../src/policy';
-import { MAIL, mailEndpoint } from '../src/webdav';
+import { MAIL, mailEndpoint, ROOT } from '../src/webdav';
 
 const fails = (code: string) => (error: unknown) => error instanceof SyncError && error.code === code;
 
@@ -68,8 +68,9 @@ test('concurrent Markdown edits survive on both devices and replay without dupli
   a.local.put('Конфликт.md', 'laptop edit');
   b.local.put('Конфликт.md', 'PC edit');
   const outcomes = await Promise.allSettled([a.run(), b.run()]);
-  assert.equal(outcomes.filter(outcome => outcome.status === 'fulfilled').length, 1);
-  for (const outcome of outcomes) if (outcome.status === 'rejected') assert.ok(fails('busy')(outcome.reason));
+  assert.equal(outcomes.reduce((count, outcome) =>
+    count + (outcome.status === 'fulfilled' ? outcome.value.counts.push : 0), 0), 1);
+  for (const outcome of outcomes) if (outcome.status === 'rejected') assert.ok(fails('cloud-advanced')(outcome.reason));
   for (const client of [a, b, a, b]) await client.run();
   for (const client of [a, b]) {
     const paths = [...client.local.group('content').keys()];
@@ -326,5 +327,92 @@ test('interrupted cloud commit leaves old bytes and a lock, with no blind retry'
   assert.equal(a.local.text('Keep.md'), 'uncommitted');
   assert.ok([...server.folders].some(path => path.endsWith('/metadata/lock')));
   server.fault = undefined;
-  await assert.rejects(b.run(), fails('busy'));
+  b.local.put('Another.md', 'must wait');
+  assert.deepEqual((await b.run()).errors, ['cloud-lock']);
+  assert.equal(b.local.text('Keep.md'), 'published');
+});
+
+test('laptop downloads an already published phone edit while a stale cloud lock exists', async t => {
+  const { a, mobile, server, id } = await setup(t);
+  a.local.put('Тест.md', 'windows');
+  await a.run();
+  await mobile.run();
+  mobile.local.put('Тест.md', 'iPhone edit');
+  await mobile.run();
+  const lock = ROOT + '/vaults/' + id + '/metadata/lock';
+  assert.equal(await server.dav().mkdir(lock), true);
+  const offset = server.requests.length;
+  const result = await a.run();
+  assert.equal(a.local.text('Тест.md'), 'iPhone edit');
+  assert.equal(result.counts.pull, 1);
+  assert.deepEqual(result.errors, []);
+  assert.equal(server.requests.slice(offset).some(row => row.method === 'MKCOL' || row.method === 'DELETE'), false);
+  assert.equal(server.folders.has('/' + lock), true);
+});
+
+test('a cloud lock defers writes and local deletions while unrelated published downloads continue', async t => {
+  const { a, b, server, id } = await setup(t);
+  a.local.put('Incoming.md', 'before');
+  a.local.put('Delete.md', 'keep while locked');
+  await a.run();
+  await b.run();
+  a.local.put('Incoming.md', 'published');
+  a.local.group('content').delete('Delete.md');
+  await a.run();
+  b.local.put('Outgoing.md', 'local draft');
+  const lock = ROOT + '/vaults/' + id + '/metadata/lock';
+  assert.equal(await server.dav().mkdir(lock), true);
+  const partial = await b.run();
+  assert.equal(partial.counts.pull, 1);
+  assert.equal(partial.counts.blocked, 2);
+  assert.deepEqual(partial.errors, ['cloud-lock']);
+  assert.equal(b.local.text('Incoming.md'), 'published');
+  assert.equal(b.local.text('Delete.md'), 'keep while locked');
+  assert.equal(b.local.text('Outgoing.md'), 'local draft');
+  assert.equal(b.state.base.content['Outgoing.md'], undefined);
+  await server.dav().remove(lock);
+  const complete = await b.run();
+  assert.equal(complete.counts.push, 1);
+  assert.equal(complete.counts['delete-local'], 1);
+  await a.run();
+  assert.equal(a.local.text('Outgoing.md'), 'local draft');
+});
+
+test('uncertain upload of an unreferenced blob releases the lock and can be retried', async t => {
+  const { a, b, server } = await setup(t);
+  a.local.put('Retry.md', 'pending');
+  server.fault = (method, path) => method === 'PUT' && path.includes('/content/') ? { status: 500 } : undefined;
+  await assert.rejects(a.run(), fails('upload-retry'));
+  assert.equal([...server.folders].some(path => path.endsWith('/metadata/lock')), false);
+  assert.equal(a.local.text('Retry.md'), 'pending');
+  server.fault = undefined;
+  await a.run();
+  await b.run();
+  assert.equal(b.local.text('Retry.md'), 'pending');
+});
+
+test('successful commit and lock removal can be verified after the server loses both replies', async t => {
+  const { a, b, server } = await setup(t);
+  a.local.put('Verified.md', 'ready');
+  server.afterMutation = (method, path) =>
+    (method === 'MKCOL' && path.includes('/commits/')) || (method === 'DELETE' && path.endsWith('/metadata/lock'))
+      ? { status: 500 } : undefined;
+  await a.run();
+  await b.run();
+  assert.equal(b.local.text('Verified.md'), 'ready');
+  assert.equal([...server.folders].some(path => path.endsWith('/metadata/lock')), false);
+  assert.equal(server.requests.filter(row => row.method === 'DELETE' && row.path.endsWith('/metadata/lock')).length, 3);
+});
+
+test('a refused unlock reports the distinct error and leaves committed data available', async t => {
+  const { a, b, server } = await setup(t);
+  a.local.put('Refused unlock.md', 'before');
+  await a.run();
+  await b.run();
+  a.local.put('Refused unlock.md', 'published');
+  server.fault = (method, path) => method === 'DELETE' && path.endsWith('/metadata/lock') ? { status: 403 } : undefined;
+  await assert.rejects(a.run(), fails('cloud-unlock'));
+  assert.equal((await b.run()).counts.pull, 1);
+  assert.equal(b.local.text('Refused unlock.md'), 'published');
+  assert.equal([...server.folders].some(path => path.endsWith('/metadata/lock')), true);
 });

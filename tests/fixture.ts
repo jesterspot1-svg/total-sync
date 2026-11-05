@@ -15,6 +15,7 @@ export class DavServer {
   readonly requests: { method: string; path: string }[] = [];
   clock = Date.UTC(2026, 10, 5);
   fault?: Fault;
+  afterMutation?: Fault;
   move = true;
   offline = false;
   private readonly server: Server;
@@ -45,7 +46,10 @@ export class DavServer {
           if (this.folders.has(path) || this.files.has(path)) return send(405);
           if (!this.folders.has(parent)) return send(409);
           this.folders.add(path);
-          return send(201);
+          {
+            const reply = this.afterMutation?.(method, path);
+            return send(reply?.status ?? 201, reply?.body);
+          }
         case 'GET': {
           const data = this.files.get(path);
           return data ? send(200, new Uint8Array(data)) : send(404);
@@ -63,7 +67,10 @@ export class DavServer {
           if (!this.folders.has(path)) return send(404);
           for (const file of this.files.keys()) if (file.startsWith(path + '/')) this.files.delete(file);
           for (const folder of this.folders) if (folder === path || folder.startsWith(path + '/')) this.folders.delete(folder);
-          return send(204);
+          {
+            const reply = this.afterMutation?.(method, path);
+            return send(reply?.status ?? 204, reply?.body);
+          }
         case 'MOVE': {
           if (!this.move) return send(405);
           const data = this.files.get(path);

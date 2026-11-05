@@ -241,6 +241,12 @@ export default class TotalSync extends Plugin {
     }, delay);
   }
 
+  private retryAfterFailure(code: SyncError['code']): void {
+    if (!['network', 'timeout', 'cloud-lock', 'cloud-advanced', 'upload-retry', 'rate', 'server'].includes(code)) return;
+    const delay = Math.min(300, this.config.retry * 2 ** Math.min(8, this.retryCount++));
+    this.scheduleRetry((delay + Math.random()) * 1000);
+  }
+
   files(): ObsidianFiles {
     return new ObsidianFiles(this.app.vault, this.config.device, this.maxBytes, this.config.attachments,
       prefixes(this.config.exclude), this.config.calendar);
@@ -303,25 +309,26 @@ export default class TotalSync extends Plugin {
     }
     await this.operate(async () => {
       const result = await this.engine().run(this.state, approval);
-      const complete = result.counts.blocked === 0;
+      const complete = result.counts.blocked === 0 && result.errors.length === 0;
       const lastSuccess = complete ? Date.now() : this.lastSuccess;
       await this.saveData({ binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess });
       this.lastSuccess = lastSuccess;
       this.state = result.state;
       this.devices = result.devices;
-      this.retryCount = 0;
+      if (complete) this.retryCount = 0;
       const n = result.counts;
       this.record('sync push=' + n.push + ' pull=' + n.pull + ' deleted=' + (n['delete-local'] + n['delete-remote'])
         + ' conflicts=' + n.conflict + ' blocked=' + n.blocked + ' checked=' + (n.equal + n.push + n.pull + n.conflict));
       if (!complete) {
         this.currentError = result.errors[0] ?? 'path';
         this.record(this.currentError);
+        this.retryAfterFailure(this.currentError);
       }
       if (n.conflict) new Notice(t('TotalSync saved conflicting versions. Check conflict copies and history.', 'TotalSync сохранил конфликтующие версии. Проверьте копии и историю.'));
       if (result.desktopChanged) new Notice(t('Desktop settings changed. Close and reopen the vault to apply them.', 'Настройки Windows изменились. Закройте и заново откройте хранилище для их применения.'));
       if (manual) new Notice(complete
         ? t('TotalSync finished.', 'TotalSync завершил синхронизацию.')
-        : t('Some operations were skipped. Open the plan and diagnostics.', 'Часть операций пропущена. Откройте план и диагностику.'));
+        : errorText(this.currentError ?? 'local'));
     }, manual, true);
   }
 
@@ -340,10 +347,7 @@ export default class TotalSync extends Plugin {
       this.currentError = failure.code;
       this.record(failure.code, failure.status);
       if (notify || failure.code === 'mass-delete') new Notice(errorText(failure.code));
-      if (retry && ['network', 'timeout', 'busy', 'rate', 'server'].includes(failure.code)) {
-        const delay = Math.min(300, this.config.retry * 2 ** Math.min(8, this.retryCount++));
-        this.scheduleRetry((delay + Math.random()) * 1000);
-      }
+      if (retry) this.retryAfterFailure(failure.code);
       return undefined;
     } finally {
       this.working = false;

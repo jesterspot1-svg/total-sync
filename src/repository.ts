@@ -7,6 +7,7 @@ import { ROOT, WebDav } from './webdav';
 
 export interface Head extends Checkpoint {
   manifest: Manifest;
+  pending?: boolean;
 }
 
 export class RemoteVault {
@@ -64,7 +65,7 @@ export class RemoteVault {
   async lock<T>(action: () => Promise<T>): Promise<T> {
     const lockPath = this.meta + '/lock';
     if (!await this.dav.collection(this.meta)) throw new SyncError('missing');
-    if (!await this.dav.mkdir(lockPath)) throw new SyncError('busy');
+    if (!await this.dav.mkdir(lockPath)) throw new SyncError('cloud-lock');
     let uncertain = false;
     try {
       return await action();
@@ -72,7 +73,22 @@ export class RemoteVault {
       uncertain = error instanceof SyncError && error.code === 'uncertain';
       throw error;
     } finally {
-      if (!uncertain) await this.dav.remove(lockPath);
+      if (!uncertain) await this.releaseLock(lockPath);
+    }
+  }
+
+  private async releaseLock(path: string): Promise<void> {
+    try {
+      await this.dav.remove(path);
+    } catch (error) {
+      const status = error instanceof SyncError ? error.status : undefined;
+      // The reply can be lost after DELETE. Read the result without issuing another DELETE.
+      try {
+        if (!await this.dav.collection(path)) return;
+      } catch {
+        // The lock's disappearance could not be confirmed.
+      }
+      throw new SyncError('cloud-unlock', status);
     }
   }
 
@@ -95,7 +111,7 @@ export class RemoteVault {
     return { manifest, revision, hash: await sha256(bytes) };
   }
 
-  async head(known: Checkpoint | null): Promise<Head> {
+  async head(known: Checkpoint | null, publishedOnly = false): Promise<Head> {
     const start = known?.revision ?? 0;
     if (!await this.committed(start)) throw new SyncError(known ? 'integrity' : 'missing');
     let current = await this.read(start);
@@ -105,7 +121,10 @@ export class RemoteVault {
       if (next.manifest.parent !== current.hash) throw new SyncError('integrity');
       current = next;
     }
-    if (await this.dav.collection(this.reservation(current.revision + 1))) throw new SyncError('integrity');
+    if (await this.dav.collection(this.reservation(current.revision + 1))) {
+      if (!publishedOnly) throw new SyncError('integrity');
+      current.pending = true;
+    }
     return current;
   }
 
@@ -120,13 +139,31 @@ export class RemoteVault {
     if (await this.committed(revision) || !await this.dav.mkdir(this.reservation(revision))) throw new SyncError('integrity');
     await this.dav.put(path, bytes);
     if (await sha256(await this.dav.get(path)) !== hash) throw new SyncError('integrity');
-    if (!await this.dav.mkdir(this.meta + '/commits/' + revision)) throw new SyncError('integrity');
+    try {
+      if (!await this.dav.mkdir(this.meta + '/commits/' + revision)) throw new SyncError('integrity');
+    } catch (error) {
+      if (!(error instanceof SyncError) || error.code !== 'uncertain') throw error;
+      try {
+        if (await this.committed(revision) && (await this.read(revision)).hash === hash) {
+          return { manifest, revision, hash };
+        }
+      } catch {
+        // Preserve the lock until the commit can be verified.
+      }
+      throw error;
+    }
     return { manifest, revision, hash };
   }
 
   async upload(channel: Channel, bytes: ArrayBuffer, hash: string, device: string, at: number): Promise<RemoteFile> {
     const file: RemoteFile = { kind: 'file', hash, size: bytes.byteLength, blob: crypto.randomUUID(), device, at };
-    await this.dav.put(this.blobPath(channel, file.blob), bytes);
+    try {
+      await this.dav.put(this.blobPath(channel, file.blob), bytes);
+    } catch (error) {
+      // A late upload to a fresh UUID cannot change a published revision.
+      if (error instanceof SyncError && error.code === 'uncertain') throw new SyncError('upload-retry', error.status);
+      throw error;
+    }
     await this.download(channel, file);
     return file;
   }

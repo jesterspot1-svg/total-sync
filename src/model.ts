@@ -9,7 +9,8 @@ export const index = <T>(): Record<string, T> => Object.create(null) as Record<s
 
 export type ErrorCode =
   | 'auth' | 'forbidden' | 'missing' | 'rate' | 'server' | 'network' | 'timeout' | 'uncertain'
-  | 'dav' | 'protocol' | 'busy' | 'integrity' | 'identity' | 'path' | 'changed'
+  | 'dav' | 'protocol' | 'busy' | 'cloud-lock' | 'cloud-unlock' | 'cloud-advanced' | 'upload-retry'
+  | 'integrity' | 'identity' | 'path' | 'changed'
   | 'mass-delete' | 'size' | 'configuration' | 'local' | 'inactive';
 
 export class SyncError extends Error {
