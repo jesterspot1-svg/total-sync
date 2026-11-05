@@ -156,7 +156,8 @@ export default class TotalSync extends Plugin {
       const credential = this.credential(login, password);
       const result = await RemoteVault.probe(this.dav(endpoint, credential));
       this.app.secretStorage.setSecret(secretKey, JSON.stringify(credential));
-      this.record(result.move ? 'probe-move' : 'probe');
+      this.update({ exclusiveMove: result.exclusiveMove });
+      this.record(result.exclusiveMove ? 'probe-exclusive-move' : result.move ? 'probe-move' : 'probe');
       new Notice(t('WebDAV verified. App password saved locally.', 'WebDAV проверен. Пароль приложения сохранён локально.'));
     });
   }
@@ -168,9 +169,9 @@ export default class TotalSync extends Plugin {
       if (localStorage.getItem(claimKey) && localStorage.getItem(claimKey) !== this.config.device) throw new SyncError('identity');
       const credential = this.credential(login, password);
       const dav = this.dav(endpoint, credential);
-      await RemoteVault.probe(dav);
+      const probe = await RemoteVault.probe(dav);
       const remote = new RemoteVault(dav, binding);
-      const head = create ? await remote.create(Date.now()) : await remote.head(null);
+      const head = create ? await remote.create(Date.now()) : await remote.head(null, true);
       if (this.stopped) throw new SyncError('inactive');
       const next = newState();
       next.checkpoint = { revision: head.revision, hash: head.hash };
@@ -179,7 +180,7 @@ export default class TotalSync extends Plugin {
       this.claim(binding);
       this.state = next;
       this.devices = head.manifest.devices;
-      this.update({ binding, enabled: false });
+      this.update({ binding, enabled: false, exclusiveMove: probe.exclusiveMove });
       this.record(create ? 'created' : 'joined');
       new Notice(t('Vault connected. Review the sync plan before enabling sync.', 'Хранилище подключено. Перед включением синхронизации проверьте план.'));
     });
@@ -242,7 +243,7 @@ export default class TotalSync extends Plugin {
   }
 
   private retryAfterFailure(code: SyncError['code']): void {
-    if (!['network', 'timeout', 'cloud-lock', 'cloud-advanced', 'upload-retry', 'rate', 'server'].includes(code)) return;
+    if (!['network', 'timeout', 'cloud-lock', 'cloud-advanced', 'cloud-preparing', 'upload-retry', 'rate', 'server'].includes(code)) return;
     const delay = Math.min(300, this.config.retry * 2 ** Math.min(8, this.retryCount++));
     this.scheduleRetry((delay + Math.random()) * 1000);
   }
@@ -256,7 +257,7 @@ export default class TotalSync extends Plugin {
     if (!this.config.binding || this.stateError) throw new SyncError(this.stateError ? 'integrity' : 'identity');
     const credential = this.credentials();
     if (!credential) throw new SyncError('configuration');
-    const remote = new RemoteVault(this.dav(MAIL, credential), this.config.binding);
+    const remote = new RemoteVault(this.dav(MAIL, credential), this.config.binding, this.config.exclusiveMove);
     return new SyncEngine(remote, files, {
       device: this.config.device, profile: this.profile, maxBytes: this.maxBytes,
       active: () => !this.stopped && !this.suspended,

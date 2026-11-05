@@ -2,6 +2,7 @@ import { idPattern, object, SyncError } from './model';
 import { pathKey, portablePath } from './policy';
 
 export interface Options {
+  exclusiveMove: boolean;
   binding: string;
   device: string;
   enabled: boolean;
@@ -35,6 +36,7 @@ export function options(data: unknown): Options {
   const exclude = typeof stored.exclude === 'string' ? stored.exclude : '';
   prefixes(exclude);
   return {
+    exclusiveMove: bool('exclusiveMove', false),
     binding, device: typeof stored.device === 'string' && idPattern.test(stored.device) ? stored.device : crypto.randomUUID(),
     enabled: bool('enabled', false), content: bool('content', true), attachments: bool('attachments', true),
     desktop: bool('desktop', true), bookmarks: bool('bookmarks', false), calendar: bool('calendar', false),

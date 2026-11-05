@@ -20,9 +20,14 @@ async function setup(t: TestContext) {
 test('connection probe verifies access, exclusive MKCOL, binary, DELETE and optional MOVE', async t => {
   const server = await new DavServer().start();
   t.after(() => server.close());
-  assert.deepEqual(await RemoteVault.probe(server.dav()), { move: true });
+  assert.deepEqual(await RemoteVault.probe(server.dav()), { move: true, exclusiveMove: true });
+  server.ignoreOverwrite = true;
+  assert.deepEqual(await RemoteVault.probe(server.dav()), { move: true, exclusiveMove: false });
+  server.ignoreOverwrite = false;
+  server.moveCollections = false;
+  assert.deepEqual(await RemoteVault.probe(server.dav()), { move: true, exclusiveMove: false });
   server.move = false;
-  assert.deepEqual(await RemoteVault.probe(server.dav()), { move: false });
+  assert.deepEqual(await RemoteVault.probe(server.dav()), { move: false, exclusiveMove: false });
   assert.equal([...server.folders].some(path => path.includes('probe-')), false);
   assert.equal(mailEndpoint(MAIL + '/'), MAIL);
   for (const bad of ['http://webdav.cloud.mail.ru', 'https://example.com', MAIL + '/something', MAIL + '?x=1']) {
@@ -415,4 +420,104 @@ test('a refused unlock reports the distinct error and leaves committed data avai
   assert.equal((await b.run()).counts.pull, 1);
   assert.equal(b.local.text('Refused unlock.md'), 'published');
   assert.equal([...server.folders].some(path => path.endsWith('/metadata/lock')), true);
+});
+
+test('exclusive MOVE publishes phone edits while the old empty lock still exists', async t => {
+  const { a, server, id } = await setup(t);
+  const phone = new Client(server, id, 'mobile', undefined, true);
+  a.local.put('Бета.md', 'first');
+  await a.run();
+  await phone.run();
+  const lock = ROOT + '/vaults/' + id + '/metadata/lock';
+  await server.dav().mkdir(lock);
+  phone.local.put('Бета.md', 'VPN round trip');
+  assert.equal((await phone.run()).counts.push, 1);
+  assert.equal((await a.run()).counts.pull, 1);
+  assert.equal(a.local.text('Бета.md'), 'VPN round trip');
+  assert.equal(server.folders.has('/' + lock), true);
+});
+
+test('concurrent exclusive publishers replan conflicts and preserve both notes', async t => {
+  const { server, id } = await setup(t);
+  const a = new Client(server, id, 'windows', undefined, true);
+  const b = new Client(server, id, 'mobile', undefined, true);
+  a.local.put('Race.md', 'before');
+  await a.run();
+  await b.run();
+  a.local.put('Race.md', 'laptop edit');
+  b.local.put('Race.md', 'phone edit');
+  const outcomes = await Promise.allSettled([a.run(), b.run()]);
+  for (const outcome of outcomes) if (outcome.status === 'rejected') assert.ok(fails('cloud-advanced')(outcome.reason));
+  for (const client of [a, b, a, b]) await client.run();
+  for (const client of [a, b]) {
+    const paths = [...client.local.group('content').keys()];
+    assert.equal(paths.length, 2);
+    assert.deepEqual(new Set(paths.map(path => client.local.text(path))), new Set(['laptop edit', 'phone edit']));
+  }
+  assert.equal(server.folders.has('/' + ROOT + '/vaults/' + id + '/metadata/lock'), false);
+});
+
+test('interrupted publisher is completed by another client from the verified ready record', async t => {
+  const { a, server, id, remote } = await setup(t);
+  const phone = new Client(server, id, 'mobile', undefined, true);
+  a.local.put('Interrupted.md', 'before');
+  await a.run();
+  await phone.run();
+  phone.local.put('Interrupted.md', 'prepared');
+  server.fault = (method, path) => method === 'MKCOL' && path.includes('/commits/') ? { status: 500 } : undefined;
+  assert.deepEqual((await phone.run()).errors, ['cloud-preparing']);
+  assert.equal((await remote.head(null, true)).pending, true);
+  server.fault = undefined;
+  const helper = new Client(server, id, 'windows', undefined, true);
+  await assert.rejects(helper.run(), fails('cloud-advanced'));
+  await helper.run();
+  await a.run();
+  assert.equal(a.local.text('Interrupted.md'), 'prepared');
+  assert.equal(helper.local.text('Interrupted.md'), 'prepared');
+});
+
+test('exclusive publisher verifies a moved revision after losing the MOVE reply', async t => {
+  const { a, server, id } = await setup(t);
+  const phone = new Client(server, id, 'mobile', undefined, true);
+  phone.local.put('Lost response.md', 'publish once');
+  server.afterMutation = (method, path) => method === 'MOVE' && path.includes('/metadata/staging/') ? { status: 500 } : undefined;
+  assert.equal((await phone.run()).counts.push, 1);
+  await a.run();
+  assert.equal(a.local.text('Lost response.md'), 'publish once');
+  assert.equal((await phone.run()).counts.push, 0);
+});
+
+test('exclusive publication leaves an abandoned legacy reservation untouched', async t => {
+  const { a, server, id } = await setup(t);
+  a.local.put('Old.md', 'committed');
+  await a.run();
+  const revision = (a.state.checkpoint?.revision ?? 0) + 1;
+  const legacy = ROOT + '/vaults/' + id + '/metadata/revisions/' + revision;
+  await server.dav().mkdir(legacy);
+  const phone = new Client(server, id, 'mobile', undefined, true);
+  phone.local.put('Pending.md', 'wait locally');
+  assert.deepEqual((await phone.run()).errors, ['cloud-preparing']);
+  assert.equal(phone.local.text('Old.md'), 'committed');
+  assert.equal(phone.local.text('Pending.md'), 'wait locally');
+  assert.equal(server.files.has('/' + legacy + '/index.json'), false);
+});
+
+test('a damaged ready record cannot publish an unconfirmed revision', async t => {
+  const { a, server, id, remote } = await setup(t);
+  const phone = new Client(server, id, 'mobile', undefined, true);
+  a.local.put('Checked.md', 'known good');
+  await a.run();
+  await phone.run();
+  const previous = phone.state.checkpoint?.revision ?? 0;
+  phone.local.put('Checked.md', 'new draft');
+  server.fault = (method, path) => method === 'MKCOL' && path.includes('/commits/') ? { status: 500 } : undefined;
+  assert.deepEqual((await phone.run()).errors, ['cloud-preparing']);
+  server.fault = undefined;
+  const prefix = '/' + ROOT + '/vaults/' + id + '/metadata';
+  server.files.set(prefix + '/revisions/' + (previous + 1) + '/ready', encode('0'.repeat(64)));
+  await assert.rejects(phone.run(), fails('integrity'));
+  assert.equal(server.folders.has(prefix + '/commits/' + (previous + 1)), false);
+  assert.equal((await remote.head(null, true)).revision, previous);
+  assert.equal(a.local.text('Checked.md'), 'known good');
+  assert.equal(phone.local.text('Checked.md'), 'new draft');
 });

@@ -4,7 +4,7 @@
 
 TotalSync is a free Obsidian plugin that syncs vault data through [Mail Cloud WebDAV](https://help.mail.ru/cloud/desktop/webdav/). It uses a dedicated remote vault ID and independent channels for notes and attachments, selected Windows settings, and optional Bookmarks snapshots.
 
-**0.1.1 is a test prerelease for disposable vaults with synthetic data.** It requires Obsidian 1.11.5 or later. Verify the provider and iPhone scenarios in the [beta guide](docs/BETA_TEST_INSTRUCTION_RU.md) before planning a migration.
+**0.1.2 is a test prerelease for disposable vaults with synthetic data.** It requires Obsidian 1.11.5 or later. Verify the provider and iPhone scenarios in the [beta guide](docs/BETA_TEST_INSTRUCTION_RU.md) before planning a migration.
 
 ## Data and privacy
 
@@ -12,7 +12,7 @@ TotalSync is a free Obsidian plugin that syncs vault data through [Mail Cloud We
 - Windows transfers selected core settings, hotkeys, safe CSS and theme files, plugin IDs, versions and enabled state, plus a small opt-in subset of Calendar preferences. Install and manage plugins through Obsidian's community plugin manager.
 - Bookmarks are shared as explicit snapshots. Exported snapshots and recovered copies appear under `TotalSync-Recovery`. The live Bookmarks file remains under Obsidian's control.
 - Data is transferred over HTTPS. Mail Cloud can read the data at rest, including file names and retained versions. This version provides no client-side content encryption. It keeps credentials in local Obsidian SecretStorage and sends no telemetry.
-- The protocol requires exclusive `MKCOL`. The connection probe checks this property before binding the vault. Read the [known limitations](docs/RISKS_RU.md) before testing.
+- The connection probe checks exclusive `MKCOL` and tests whether the server accepts collection `MOVE` with no overwrite. A verified move allows publication without the legacy global lock. Read the [known limitations](docs/RISKS_RU.md) before testing.
 
 ## Development
 

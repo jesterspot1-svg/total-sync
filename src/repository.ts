@@ -1,5 +1,5 @@
 import {
-  channels, encode, idPattern, sha256, SyncError,
+  channels, encode, hashPattern, idPattern, sha256, SyncError,
   type Channel, type Checkpoint, type Manifest, type RemoteFile,
 } from './model';
 import { emptyManifest, validateManifest } from './manifest';
@@ -14,7 +14,7 @@ export class RemoteVault {
   private readonly root: string;
   private readonly meta: string;
 
-  constructor(private readonly dav: WebDav, private readonly id: string) {
+  constructor(private readonly dav: WebDav, private readonly id: string, private readonly exclusiveMove = false) {
     if (!idPattern.test(id)) throw new SyncError('identity');
     this.root = ROOT + '/vaults/' + id;
     this.meta = this.root + '/metadata';
@@ -24,7 +24,7 @@ export class RemoteVault {
     return this.dav.serverTime;
   }
 
-  static async probe(dav: WebDav): Promise<{ move: boolean }> {
+  static async probe(dav: WebDav): Promise<{ move: boolean; exclusiveMove: boolean }> {
     if (!await dav.collection('')) throw new SyncError('missing');
     await dav.mkdir(ROOT);
     const path = ROOT + '/probe-' + crypto.randomUUID();
@@ -42,10 +42,44 @@ export class RemoteVault {
       if (move && await sha256(await dav.get(path + '/moved.bin')) !== await sha256(sample)) throw new SyncError('integrity');
       await dav.remove(lock);
       if (await dav.collection(lock)) throw new SyncError('protocol');
-      return { move };
+      let exclusiveMove = false;
+      if (move) {
+        try {
+          exclusiveMove = await this.probeExclusiveMove(dav, path);
+        } catch (error) {
+          // A partial collection MOVE response is inconclusive in the disposable probe.
+          if (!(error instanceof SyncError) || error.status !== 207) throw error;
+        }
+      }
+      return { move, exclusiveMove };
     } finally {
       await dav.remove(path);
     }
+  }
+
+  private static async probeExclusiveMove(dav: WebDav, path: string): Promise<boolean> {
+    const occupied = path + '/occupied';
+    const candidates = ['a', 'b'].map(name => ({ path: path + '/candidate-' + name, bytes: encode(name) }));
+    await dav.mkdir(occupied);
+    for (const candidate of candidates) {
+      await dav.mkdir(candidate.path);
+      await dav.put(candidate.path + '/index.json', candidate.bytes);
+      await dav.put(candidate.path + '/ready', candidate.bytes);
+    }
+    // A legacy writer reserves an empty collection before filling it.
+    if (await dav.moveNewCollection(candidates[0]!.path, occupied) !== 'occupied') return false;
+    try {
+      await dav.get(occupied + '/index.json');
+      return false;
+    } catch (error) {
+      if (!(error instanceof SyncError) || error.code !== 'missing') throw error;
+    }
+    const target = path + '/winner';
+    const results = await Promise.all(candidates.map(candidate => dav.moveNewCollection(candidate.path, target)));
+    if (!results.includes('occupied') || !results.includes('moved') || await dav.mkdir(target)) return false;
+    const winner = candidates[results.indexOf('moved')]!;
+    return await sha256(await dav.get(target + '/index.json')) === await sha256(winner.bytes)
+      && await sha256(await dav.get(target + '/ready')) === await sha256(winner.bytes);
   }
 
   async create(now: number): Promise<Head> {
@@ -75,6 +109,10 @@ export class RemoteVault {
     } finally {
       if (!uncertain) await this.releaseLock(lockPath);
     }
+  }
+
+  write<T>(action: () => Promise<T>): Promise<T> {
+    return this.exclusiveMove ? action() : this.lock(action);
   }
 
   private async releaseLock(path: string): Promise<void> {
@@ -128,6 +166,12 @@ export class RemoteVault {
     return current;
   }
 
+  async headForWrite(known: Checkpoint): Promise<Head> {
+    if (!this.exclusiveMove) return this.head(known);
+    const head = await this.head(known, true);
+    return head.pending ? this.finishPrepared(head) : head;
+  }
+
   async publish(manifest: Manifest, previous: Head | null): Promise<Head> {
     const revision = previous ? previous.revision + 1 : 0;
     manifest.revision = revision;
@@ -135,8 +179,11 @@ export class RemoteVault {
     const bytes = encode(JSON.stringify(manifest));
     validateManifest(bytes, this.id);
     const hash = await sha256(bytes);
+    if (previous && this.exclusiveMove) return this.publishPrepared(previous, bytes, hash);
     const path = this.revisionPath(revision);
-    if (await this.committed(revision) || !await this.dav.mkdir(this.reservation(revision))) throw new SyncError('integrity');
+    if (await this.committed(revision) || !await this.dav.mkdir(this.reservation(revision))) {
+      throw new SyncError(previous ? 'cloud-advanced' : 'integrity');
+    }
     await this.dav.put(path, bytes);
     if (await sha256(await this.dav.get(path)) !== hash) throw new SyncError('integrity');
     try {
@@ -153,6 +200,67 @@ export class RemoteVault {
       throw error;
     }
     return { manifest, revision, hash };
+  }
+
+  private async publishPrepared(previous: Head, bytes: ArrayBuffer, hash: string): Promise<Head> {
+    const revision = previous.revision + 1;
+    const target = this.reservation(revision);
+    if (await this.committed(revision) || await this.dav.collection(target)) throw new SyncError('cloud-advanced');
+    const staging = this.meta + '/staging';
+    const source = staging + '/' + crypto.randomUUID();
+    try {
+      await this.dav.mkdir(staging);
+      if (!await this.dav.mkdir(source)) throw new SyncError('integrity');
+      await this.dav.put(source + '/index.json', bytes);
+      if (await sha256(await this.dav.get(source + '/index.json')) !== hash) throw new SyncError('integrity');
+      await this.dav.put(source + '/ready', encode(hash));
+    } catch (error) {
+      // A late write to this UUID cannot change an active revision.
+      if (error instanceof SyncError && error.code === 'uncertain') throw new SyncError('upload-retry', error.status);
+      throw error;
+    }
+
+    let moved;
+    try {
+      moved = await this.dav.moveNewCollection(source, target);
+    } catch (error) {
+      if (!(error instanceof SyncError) || error.code !== 'uncertain') throw error;
+      // The move can succeed even if the connection drops before its reply.
+      return this.finishPrepared(previous, hash);
+    }
+    if (moved === 'occupied') {
+      // The losing candidate is still at its unique staging path.
+      await this.dav.remove(source).catch(() => undefined);
+      throw new SyncError('cloud-advanced');
+    }
+    if (moved !== 'moved') throw new SyncError('protocol');
+    return this.finishPrepared(previous, hash);
+  }
+
+  private async finishPrepared(previous: Head, expectedHash?: string): Promise<Head> {
+    const revision = previous.revision + 1;
+    let ready: string;
+    let prepared: Head;
+    try {
+      const digest = new Uint8Array(await this.dav.get(this.reservation(revision) + '/ready'));
+      if (digest.byteLength !== 64) throw new SyncError('integrity');
+      ready = String.fromCharCode(...digest);
+      prepared = await this.read(revision);
+    } catch (error) {
+      if (error instanceof SyncError && error.code === 'missing') throw new SyncError('cloud-preparing');
+      throw error;
+    }
+    if (!hashPattern.test(ready) || ready !== prepared.hash || prepared.manifest.parent !== previous.hash) {
+      throw new SyncError('integrity');
+    }
+    if (expectedHash !== undefined && expectedHash !== prepared.hash) throw new SyncError('cloud-advanced');
+    try {
+      if (!await this.committed(revision)) await this.dav.mkdir(this.meta + '/commits/' + revision);
+    } catch (error) {
+      if (!(error instanceof SyncError) || error.code !== 'uncertain') throw error;
+      if (!await this.committed(revision)) throw new SyncError('cloud-preparing', error.status);
+    }
+    return prepared;
   }
 
   async upload(channel: Channel, bytes: ArrayBuffer, hash: string, device: string, at: number): Promise<RemoteFile> {

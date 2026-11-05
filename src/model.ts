@@ -9,7 +9,7 @@ export const index = <T>(): Record<string, T> => Object.create(null) as Record<s
 
 export type ErrorCode =
   | 'auth' | 'forbidden' | 'missing' | 'rate' | 'server' | 'network' | 'timeout' | 'uncertain'
-  | 'dav' | 'protocol' | 'busy' | 'cloud-lock' | 'cloud-unlock' | 'cloud-advanced' | 'upload-retry'
+  | 'dav' | 'protocol' | 'busy' | 'cloud-lock' | 'cloud-unlock' | 'cloud-advanced' | 'cloud-preparing' | 'upload-retry'
   | 'integrity' | 'identity' | 'path' | 'changed'
   | 'mass-delete' | 'size' | 'configuration' | 'local' | 'inactive';
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 · Test prerelease
+
+- Probe whether the server supports exclusive WebDAV collection moves, including collisions with an empty legacy reservation and simultaneous moves.
+- When verified, publish prepared revisions without depending on the legacy global lock. Concurrent writers replan against the winning revision.
+- Verify and finish a prepared revision after a lost network response or an interrupted client. Keep the previous publication path when the capability is unavailable.
+
 ## 0.1.1 · Test prerelease
 
 - Download published changes while a cloud write lock is present. Uploads and deletions still require the lock.

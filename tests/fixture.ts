@@ -17,6 +17,8 @@ export class DavServer {
   fault?: Fault;
   afterMutation?: Fault;
   move = true;
+  moveCollections = true;
+  ignoreOverwrite = false;
   offline = false;
   private readonly server: Server;
   private origin = '';
@@ -74,12 +76,29 @@ export class DavServer {
         case 'MOVE': {
           if (!this.move) return send(405);
           const data = this.files.get(path);
+          const collection = this.folders.has(path);
           const destination = new URL(String(request.headers.destination)).pathname;
-          if (!data) return send(404);
-          if (this.files.has(destination)) return send(412);
-          this.files.set(destination, data);
-          this.files.delete(path);
-          return send(201);
+          if (!data && !collection) return send(404);
+          if (collection && !this.moveCollections) return send(405);
+          const occupied = this.files.has(destination) || this.folders.has(destination);
+          if (occupied && request.headers.overwrite === 'F' && !this.ignoreOverwrite) return send(412);
+          if (collection) {
+            for (const [file, bytes] of [...this.files]) {
+              if (!file.startsWith(path + '/')) continue;
+              this.files.set(destination + file.slice(path.length), bytes);
+              this.files.delete(file);
+            }
+            for (const folder of [...this.folders]) {
+              if (folder !== path && !folder.startsWith(path + '/')) continue;
+              this.folders.add(destination + folder.slice(path.length));
+              this.folders.delete(folder);
+            }
+          } else if (data) {
+            this.files.set(destination, data);
+            this.files.delete(path);
+          }
+          const reply = this.afterMutation?.(method, path);
+          return send(reply?.status ?? (occupied ? 204 : 201), reply?.body);
         }
         default:
           return send(405);
@@ -191,8 +210,8 @@ export class Client {
   engine: SyncEngine;
   readonly device = crypto.randomUUID();
 
-  constructor(server: DavServer, id: string, profile: Profile = 'windows', maxBytes = 8 * 1024 * 1024) {
-    const remote = new RemoteVault(server.dav(), id);
+  constructor(server: DavServer, id: string, profile: Profile = 'windows', maxBytes = 8 * 1024 * 1024, exclusiveMove = false) {
+    const remote = new RemoteVault(server.dav(), id, exclusiveMove);
     this.engine = new SyncEngine(remote, this.local, {
       device: this.device, profile, maxBytes, active: () => true, now: () => server.clock,
       selection: { channels: profile === 'windows' ? ['content', 'desktop-config', 'shared-state'] : ['content', 'shared-state'],

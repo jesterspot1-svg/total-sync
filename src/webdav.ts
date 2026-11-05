@@ -156,4 +156,18 @@ export class WebDav {
     if (![201, 204].includes(status)) throw statusError(status);
     return true;
   }
+
+  async moveNewCollection(source: string, destination: string): Promise<'moved' | 'occupied' | 'unsupported'> {
+    const { status } = await this.call('MOVE', source, {
+      Destination: this.url(destination), Overwrite: 'F', Depth: 'infinity',
+    });
+    if (status === 201) return 'moved';
+    if (status === 412) return 'occupied';
+    if ([405, 409].includes(status) && await this.collection(destination) && await this.collection(source)) {
+      return 'occupied';
+    }
+    if ([204, 400, 403, 405, 409, 501].includes(status)) return 'unsupported';
+    if (status === 207 || status >= 500) throw new SyncError('uncertain', status);
+    throw statusError(status);
+  }
 }

@@ -126,14 +126,14 @@ export class SyncEngine {
       if (needsLock) {
         try {
           this.active();
-          await this.remote.lock(async () => {
-            const current = await this.remote.head(head);
+          await this.remote.write(async () => {
+            const current = await this.remote.headForWrite(head);
             if (current.hash !== head.hash) throw new SyncError('cloud-advanced');
             // Read the manifest under the lock before modifying it. Keep the preview snapshot intact.
             cloud.head = await this.commit(current, preview, ops, cloud, errors, now);
           });
         } catch (error) {
-          if (!(error instanceof SyncError) || error.code !== 'cloud-lock') throw error;
+          if (!(error instanceof SyncError) || !['cloud-lock', 'cloud-preparing'].includes(error.code)) throw error;
           readOnly = true;
           errors.unshift(error.code);
         }
@@ -362,13 +362,13 @@ export class SyncEngine {
   }
 
   restore(state: SyncState, id: string, save: (item: HistoryItem, bytes: ArrayBuffer) => Promise<void>): Promise<void> {
-    return this.exclusive(() => this.remote.lock(async () => {
-      const head = await this.remote.head(state.checkpoint);
+    return this.exclusive(async () => {
+      const head = await this.remote.head(state.checkpoint, true);
       const item = head.manifest.history.find(entry => entry.id === id && this.options.selection.channels.includes(entry.channel));
       if (!item) throw new SyncError('missing');
       const bytes = await this.bytes(item.channel, item.path, item.file);
       this.active();
       await save(item, bytes);
-    }));
+    });
   }
 }
