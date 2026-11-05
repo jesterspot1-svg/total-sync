@@ -41,7 +41,7 @@ class Setting {
   constructor(container) { container.children.push(this); }
   setName(name) { this.name = name; return this; }
   setHeading() { return this; }
-  setDesc() { return this; }
+  setDesc(value) { this.description = value; return this; }
   add(init) {
     const control = new Control();
     init(control);
@@ -56,9 +56,13 @@ class Setting {
 
 for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   const stored = new Map();
+  const claims = new Map();
   const body = new Element();
   const ribbon = new Element();
+  const statusBar = new Element();
   const timers = new Map();
+  let now = 1_800_000_000_000;
+  let savedData = null;
   let timerId = 0;
   const window = {
     setTimeout(callback, delay) {
@@ -85,11 +89,12 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
       app = mockApp;
       manifest = manifest;
       commands = [];
-      async loadData() { return null; }
-      async saveData() {}
+      async loadData() { return savedData; }
+      async saveData(value) { savedData = value; }
       addSettingTab(tab) { this.tab = tab; }
       addCommand(command) { this.commands.push(command); }
       addRibbonIcon(icon, title, activate) { return ribbon.createEl('button', { icon, title, activate }); }
+      addStatusBarItem() { return statusBar.createDiv(); }
       registerDomEvent() {}
       registerEvent() {}
     },
@@ -107,6 +112,8 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
     require: name => { assert.equal(name, 'obsidian'); return api; },
     window,
     document: { body, hidden: false },
+    Date: class extends Date { static now() { return now; } },
+    localStorage: { getItem: key => claims.get(key), setItem: (key, value) => claims.set(key, value) },
     crypto: globalThis.crypto,
   }, { filename: 'dist/main.js' });
   const plugin = new module.exports.default();
@@ -114,6 +121,17 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   plugin.tab.display();
   const all = plugin.tab.containerEl.children;
   const labels = all.map(row => row.name);
+  const status = all.find(row => row.name === (mobile ? 'Status' : 'Состояние'));
+  const syncAgeText = mobile ? () => status.description : () => statusBar.children[0].textContent;
+  const justNow = mobile ? 'Successfully synced just now' : 'Синхронизация была сейчас';
+  const minuteAgo = mobile ? 'Successfully synced 1 minute ago' : 'Синхронизация была 1 мин назад';
+  const tick = delay => {
+    const timer = [...timers.values()].find(candidate => candidate.delay === delay);
+    assert.ok(timer, 'Expected a timer for ' + delay + ' ms');
+    timer.callback();
+  };
+  assert.equal(statusBar.children.length, mobile ? 0 : 1);
+  if (!mobile) assert.equal(statusBar.children[0].hidden, true);
   assert.ok(labels.includes('TotalSync-Beta'));
   assert.ok(labels.includes(mobile ? 'Mail WebDAV connection' : 'Подключение к WebDAV Mail'));
   assert.equal(labels.includes('Настройки Windows'), !mobile);
@@ -176,14 +194,21 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   assert.equal(badge.dataset.state, 'success');
   assert.equal(icon.icon, 'check');
   assert.equal(text.textContent, mobile ? 'Sync complete' : 'Синхронизация завершена');
-  assert.equal([...timers.values()][0].delay, 3500);
-  [...timers.values()][0].callback();
+  assert.ok(syncAgeText().includes(justNow));
+  if (!mobile) assert.equal(statusBar.children[0].hidden, false);
+  tick(3500);
   assert.equal(badge.hidden, true);
+  now += 60_000;
+  tick(60_000);
+  assert.ok(syncAgeText().includes(minuteAgo));
 
   const idle = plugin.sync(false);
   resolve({ ...success, counts: { ...count, push: 0 } });
   await idle;
   assert.equal(badge.hidden, true);
+  assert.ok(syncAgeText().includes(justNow));
+  const lastSuccessfulTime = savedData.lastSuccess;
+  now += 60_000;
 
   const partial = plugin.sync(true);
   resolve({ ...success, counts: { ...count, blocked: 1 }, errors: ['cloud-lock'] });
@@ -192,6 +217,8 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   assert.equal(icon.icon, 'circle-alert');
   assert.match(text.textContent, /locked|заблокирована/);
   assert.ok([...timers.values()].some(timer => timer.delay === 7000));
+  assert.ok(syncAgeText().includes(minuteAgo));
+  assert.equal(savedData.lastSuccess, lastSuccessfulTime);
   plugin.engine = () => ({ run: async () => { throw new Error('synthetic private exception'); } });
   await plugin.sync(true);
   assert.equal(badge.dataset.state, 'error');
@@ -201,5 +228,15 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   assert.equal(timers.size, 0);
   assert.equal(body.children.length, 0);
   assert.equal(ribbon.children.length, 0);
+  assert.equal(statusBar.children.length, 0);
+
+  const restarted = new module.exports.default();
+  await restarted.onload();
+  restarted.tab.display();
+  const restoredStatus = restarted.tab.containerEl.children.find(row => row.name === (mobile ? 'Status' : 'Состояние'));
+  assert.ok(restoredStatus.description.includes(minuteAgo));
+  restarted.tab.hide();
+  restarted.onunload();
+  assert.equal(timers.size, 0);
 }
-console.log('Built plugin verified with synthetic Obsidian API, including ribbon, feedback states and cleanup.');
+console.log('Built plugin verified with synthetic Obsidian API, including ribbon, feedback, persisted sync age and cleanup.');

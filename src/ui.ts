@@ -182,7 +182,7 @@ export class SettingsTab extends PluginSettingTab {
   }
 
   hide(): void {
-    this.plugin.onStatus = undefined;
+    this.plugin.setStatusListener();
   }
 
   private toggle(key: keyof Options, en: string, ru: string, desc: [string, string], callback?: (value: boolean) => void): void {
@@ -352,16 +352,15 @@ export class SettingsTab extends PluginSettingTab {
     help.appendText(' · ');
     help.createEl('a', { text: 'GitHub Issues', href: project + '/issues' });
 
-    const refresh = () => {
+    const refresh = (lastSync: string, exactTime: string | null) => {
       devices.setDesc(Object.entries(plugin.devices).map(([uuid, profile]) => profileName(profile) + ' · ' + uuid.slice(0, 8)).join(', ') || '—');
       const state = plugin.working ? t('Working', 'Выполняется') : plugin.queued ? t('Queued', 'В очереди')
         : plugin.config.enabled ? t('Ready', 'Готово') : t('Paused', 'Приостановлено');
-      const last = t('Last successful sync', 'Последняя успешная синхронизация') + ' · ' + (plugin.lastSuccess ? new Date(plugin.lastSuccess).toLocaleString() : '—');
+      const last = exactTime ? lastSync + ' · ' + exactTime : lastSync;
       const counts = [...plugin.log].reverse().find(entry => entry.event.startsWith('sync '))?.event;
       status.setDesc([state, last, counts, plugin.currentError ? errorText(plugin.currentError) : undefined].filter(Boolean).join('\n'));
     };
-    plugin.onStatus = refresh;
-    refresh();
+    plugin.setStatusListener(refresh);
   }
 
   private diagnostics(): void {

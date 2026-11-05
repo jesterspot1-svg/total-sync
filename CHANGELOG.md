@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.5 · Test prerelease
+
+- Show the elapsed time since the last successful sync in the desktop status bar and TotalSync settings, in Russian and English.
+- Refresh the label as time passes and after manual or scheduled success. Failed and partial attempts preserve the last successful time.
+
 ## 0.1.4 · Test prerelease
 
 - Add an optional desktop ribbon button for manual synchronization.

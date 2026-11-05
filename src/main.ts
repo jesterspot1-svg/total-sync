@@ -1,11 +1,12 @@
 import { Notice, Platform, Plugin, requestUrl, type TAbstractFile } from 'obsidian';
 import { SyncEngine } from './engine';
-import { errorText, t } from './i18n';
+import { errorText, interfaceLocale, t } from './i18n';
 import { validState } from './manifest';
 import { idPattern, newState, object, SyncError, type Manifest, type Profile, type SyncState } from './model';
 import { ObsidianFiles } from './obsidian-files';
 import { RemoteVault } from './repository';
 import { options, prefixes, type Options } from './settings';
+import { formatSyncAge } from './sync-age';
 import { SyncFeedback } from './sync-feedback';
 import { SettingsTab, showHistory, showPlan, showInventory } from './ui';
 import { collectionResponse, MAIL, mailEndpoint, WebDav, type Transport } from './webdav';
@@ -27,12 +28,12 @@ export default class TotalSync extends Plugin {
   readonly profile: Profile = Platform.isMobile ? 'mobile' : Platform.isWin ? 'windows' : 'desktop';
   readonly maxBytes = (Platform.isMobile ? 32 : 128) * 1024 * 1024;
   devices: Manifest['devices'] = {};
-  lastSuccess: number | null = null;
+  private lastSuccess: number | null = null;
   working = false;
   queued = false;
   currentError: SyncError['code'] | null = null;
   log: Logged[] = [];
-  onStatus?: () => void;
+  private onStatus?: (lastSync: string, exactTime: string | null) => void;
   private state: SyncState = newState();
   private stopped = false;
   private suspended = false;
@@ -44,6 +45,8 @@ export default class TotalSync extends Plugin {
   private changedWhileWorking = false;
   private feedback?: SyncFeedback;
   private ribbon?: HTMLElement;
+  private statusItem?: HTMLElement;
+  private statusTimer?: Timer;
 
   async onload(): Promise<void> {
     this.suspended = Platform.isMobile && document.hidden;
@@ -55,7 +58,7 @@ export default class TotalSync extends Plugin {
         if (!object(saved) || saved.binding !== this.config.binding || saved.device !== this.config.device
           || !validState(saved.state)) throw new SyncError('integrity');
         this.state = saved.state;
-        this.lastSuccess = typeof saved.lastSuccess === 'number' ? saved.lastSuccess : null;
+        this.lastSuccess = typeof saved.lastSuccess === 'number' && Number.isFinite(saved.lastSuccess) ? saved.lastSuccess : null;
         this.claim(this.config.binding);
       }
     } catch {
@@ -104,11 +107,17 @@ export default class TotalSync extends Plugin {
     this.registerDomEvent(window, 'online', () => this.scheduleRetry(1000));
     this.registerDomEvent(document, 'visibilitychange', () => {
       this.suspended = Platform.isMobile && document.hidden;
+      this.refreshStatus();
       if (Platform.isMobile && !this.suspended) this.scheduleRetry(1000);
     });
     this.app.workspace.onLayoutReady(() => {
       if (this.stopped) return;
       this.feedback = new SyncFeedback(document.body, Platform.isMobile);
+      if (!Platform.isMobile) {
+        this.statusItem = this.addStatusBarItem();
+        this.statusItem.addClass('total-sync-last-sync');
+      }
+      this.refreshStatus();
       this.updateRibbon();
       this.configureTimer();
       if (this.config.startup && this.allowed()) void this.sync(false);
@@ -120,9 +129,11 @@ export default class TotalSync extends Plugin {
     window.clearTimeout(this.debounceTimer);
     window.clearTimeout(this.retryTimer);
     window.clearInterval(this.periodicTimer);
+    window.clearTimeout(this.statusTimer);
     this.feedback?.dispose();
     this.feedback = undefined;
     this.ribbon?.remove();
+    this.statusItem?.remove();
   }
 
   private claim(binding: string): void {
@@ -227,6 +238,29 @@ export default class TotalSync extends Plugin {
     if (this.ribbon) this.ribbon.hidden = !this.config.ribbonButton;
   }
 
+  setStatusListener(listener?: (lastSync: string, exactTime: string | null) => void): void {
+    this.onStatus = listener;
+    this.refreshStatus();
+  }
+
+  private refreshStatus(): void {
+    window.clearTimeout(this.statusTimer);
+    this.statusTimer = undefined;
+    if (this.stopped || (!this.statusItem && !this.onStatus)) return;
+    const locale = interfaceLocale();
+    const age = formatSyncAge(this.lastSuccess, Date.now(), locale);
+    const exactTime = this.lastSuccess === null ? null : new Date(this.lastSuccess).toLocaleString(locale);
+    if (this.statusItem) {
+      this.statusItem.hidden = !this.config.binding;
+      this.statusItem.textContent = age.text;
+      this.statusItem.title = exactTime ?? age.text;
+    }
+    this.onStatus?.(age.text, exactTime);
+    if (age.refreshIn !== null && !document.hidden && (this.onStatus || this.config.binding)) {
+      this.statusTimer = window.setTimeout(() => this.refreshStatus(), age.refreshIn);
+    }
+  }
+
   private allowed(): boolean {
     return !this.stopped && !this.stateError && !!this.config.binding && this.config.enabled
       && !(Platform.isMobile && document.hidden);
@@ -243,7 +277,7 @@ export default class TotalSync extends Plugin {
     if (!this.allowed()) return;
     window.clearTimeout(this.debounceTimer);
     this.queued = true;
-    this.onStatus?.();
+    this.refreshStatus();
     this.debounceTimer = window.setTimeout(() => {
       this.queued = false;
       void this.sync(false);
@@ -253,7 +287,7 @@ export default class TotalSync extends Plugin {
   private scheduleRetry(delay: number): void {
     if (!this.allowed() || this.retryTimer !== undefined) return;
     this.queued = true;
-    this.onStatus?.();
+    this.refreshStatus();
     this.retryTimer = window.setTimeout(() => {
       this.retryTimer = undefined;
       this.queued = false;
@@ -394,7 +428,7 @@ export default class TotalSync extends Plugin {
     }
     this.working = true;
     this.currentError = null;
-    this.onStatus?.();
+    this.refreshStatus();
     try {
       return await action();
     } catch (error) {
@@ -410,7 +444,7 @@ export default class TotalSync extends Plugin {
         this.changedWhileWorking = false;
         this.debounce();
       }
-      this.onStatus?.();
+      this.refreshStatus();
     }
   }
 

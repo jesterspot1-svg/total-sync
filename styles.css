@@ -1,4 +1,5 @@
 .total-sync-ribbon[hidden],
+.total-sync-last-sync[hidden],
 .total-sync-feedback-badge[hidden] {
   display: none;
 }

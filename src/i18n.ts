@@ -1,7 +1,9 @@
 import { getLanguage } from 'obsidian';
 import type { SyncError } from './model';
+import type { Locale } from './sync-age';
 
-export const t = (en: string, ru: string): string => /^ru(?:-|$)/i.test(getLanguage()) ? ru : en;
+export const interfaceLocale = (): Locale => /^ru(?:-|$)/i.test(getLanguage()) ? 'ru' : 'en';
+export const t = (en: string, ru: string): string => interfaceLocale() === 'ru' ? ru : en;
 
 export function errorText(code: SyncError['code']): string {
   const messages: Record<SyncError['code'], [string, string]> = {
