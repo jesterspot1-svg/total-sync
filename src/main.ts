@@ -15,7 +15,7 @@ import { collectionResponse, MAIL, mailEndpoint, WebDav, type Transport } from '
 const storageKey = 'total-sync-options-v1';
 const secretKey = 'total-sync-mail-webdav';
 type Credential = { login: string; password: string };
-type Logged = { at: number; event: string; status?: number };
+type Logged = { at: number; event: string; status?: number; phase?: SyncError['phase'] };
 type Timer = number;
 
 const request: Transport = async ({ url, method, headers, body }) => {
@@ -480,7 +480,7 @@ export default class TotalSync extends Plugin {
     } catch (error) {
       const failure = error instanceof SyncError ? error : new SyncError('local');
       this.currentError = failure.code;
-      this.record(failure.code, failure.status);
+      this.record(failure.code, failure.status, failure.phase);
       if (notify) new Notice(errorText(failure.code));
       if (retry && !this.syncController?.signal.aborted) this.retryAfterFailure(failure.code);
       return undefined;
@@ -494,7 +494,7 @@ export default class TotalSync extends Plugin {
     }
   }
 
-  private record(event: string, status?: number): void {
-    this.log = [...this.log.slice(-49), { at: Date.now(), event, status }];
+  private record(event: string, status?: number, phase?: SyncError['phase']): void {
+    this.log = [...this.log.slice(-49), { at: Date.now(), event, status, phase }];
   }
 }

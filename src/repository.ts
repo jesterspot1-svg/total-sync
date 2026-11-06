@@ -1,6 +1,6 @@
 import {
   channels, encode, hashPattern, idPattern, sha256, SyncError,
-  type Channel, type Checkpoint, type Manifest, type RemoteFile,
+  type Channel, type Checkpoint, type Manifest, type RemoteFile, type WritePhase,
 } from './model';
 import { emptyManifest, validateManifest } from './manifest';
 import { ROOT, WebDav } from './webdav';
@@ -8,6 +8,10 @@ import { ROOT, WebDav } from './webdav';
 export interface Head extends Checkpoint {
   manifest: Manifest;
   pending?: boolean;
+}
+
+function inPhase(error: unknown, phase: WritePhase): unknown {
+  return error instanceof SyncError ? new SyncError(error.code, error.status, phase) : error;
 }
 
 export class RemoteVault {
@@ -99,7 +103,7 @@ export class RemoteVault {
   async lock<T>(action: () => Promise<T>): Promise<T> {
     const lockPath = this.meta + '/lock';
     if (!await this.dav.collection(this.meta)) throw new SyncError('missing');
-    if (!await this.dav.mkdir(lockPath)) throw new SyncError('cloud-lock');
+    if (!await this.createOwnedCollection(lockPath, 'lock-acquire')) throw new SyncError('cloud-lock');
     let uncertain = false;
     try {
       return await action();
@@ -119,6 +123,28 @@ export class RemoteVault {
     return !this.exclusiveMove && this.dav.collection(this.meta + '/lock');
   }
 
+  private async createOwnedCollection(path: string, phase: WritePhase): Promise<boolean> {
+    try {
+      return await this.dav.mkdir(path);
+    } catch (error) {
+      if (!(error instanceof SyncError) || error.code !== 'uncertain') throw inPhase(error, phase);
+      const failure = new SyncError('uncertain', error.status, phase);
+      // A collection found after a lost response may belong to another writer.
+      let absent = false;
+      try {
+        absent = !await this.dav.collection(path);
+      } catch {
+        // The retry is allowed only after an explicit absence check.
+      }
+      if (!absent) throw failure;
+    }
+    try {
+      return await this.dav.mkdir(path);
+    } catch (error) {
+      throw inPhase(error, phase);
+    }
+  }
+
   private async releaseLock(path: string): Promise<void> {
     try {
       await this.dav.remove(path);
@@ -130,7 +156,7 @@ export class RemoteVault {
       } catch {
         // The lock's disappearance could not be confirmed.
       }
-      throw new SyncError('cloud-unlock', status);
+      throw new SyncError('cloud-unlock', status, 'lock-release');
     }
   }
 
@@ -210,25 +236,76 @@ export class RemoteVault {
     const hash = await sha256(bytes);
     if (previous && this.exclusiveMove) return this.publishPrepared(previous, bytes, hash);
     const path = this.revisionPath(revision);
-    if (await this.committed(revision) || !await this.dav.mkdir(this.reservation(revision))) {
+    if (await this.committed(revision) || !await this.createOwnedCollection(this.reservation(revision), 'revision-reserve')) {
       throw new SyncError(previous ? 'cloud-advanced' : 'integrity');
     }
-    await this.dav.put(path, bytes);
-    if (await sha256(await this.dav.get(path)) !== hash) throw new SyncError('integrity');
+    await this.storeIndex(path, bytes, hash);
+    await this.publishMarker(revision, hash);
+    return { manifest, revision, hash };
+  }
+
+  private async storedIndex(path: string): Promise<ArrayBuffer | undefined> {
     try {
-      if (!await this.dav.mkdir(this.meta + '/commits/' + revision)) throw new SyncError('integrity');
+      return await this.dav.get(path);
     } catch (error) {
-      if (!(error instanceof SyncError) || error.code !== 'uncertain') throw error;
+      if (!(error instanceof SyncError)) throw error;
+      if (error.code === 'missing') return undefined;
+      if (error.code !== 'network' && error.code !== 'timeout' && error.status !== 504) throw error;
       try {
-        if (await this.committed(revision) && (await this.read(revision)).hash === hash) {
-          return { manifest, revision, hash };
+        return await this.dav.get(path);
+      } catch (retry) {
+        if (retry instanceof SyncError && retry.code === 'missing') return undefined;
+        throw retry;
+      }
+    }
+  }
+
+  private async storeIndex(path: string, bytes: ArrayBuffer, hash: string): Promise<void> {
+    let failure: SyncError | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await this.dav.put(path, bytes);
+      } catch (error) {
+        if (!(error instanceof SyncError) || error.code !== 'uncertain') throw failure ?? inPhase(error, 'revision-index');
+        failure = new SyncError('uncertain', error.status, 'revision-index');
+      }
+      let saved: ArrayBuffer | undefined;
+      try {
+        saved = await this.storedIndex(path);
+      } catch (error) {
+        throw failure ?? new SyncError('uncertain', error instanceof SyncError ? error.status : undefined, 'revision-index');
+      }
+      if (saved) {
+        if (await sha256(saved) === hash) return;
+        break;
+      }
+      // Repeat the same bytes only when readback confirms the owned path is empty.
+    }
+    throw failure ?? new SyncError('uncertain', undefined, 'revision-index');
+  }
+
+  private async publishMarker(revision: number, hash: string): Promise<void> {
+    const path = this.meta + '/commits/' + revision;
+    let failure: SyncError | undefined;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        if (await this.dav.mkdir(path)) return;
+      } catch (error) {
+        if (!(error instanceof SyncError) || error.code !== 'uncertain') {
+          throw failure ?? inPhase(error, 'commit-marker');
         }
+        failure = new SyncError('uncertain', error.status, 'commit-marker');
+      }
+      if (!failure) throw new SyncError('integrity', undefined, 'commit-marker');
+      try {
+        if (!await this.committed(revision)) continue;
+        if ((await this.read(revision)).hash === hash) return;
       } catch {
         // Preserve the lock until the commit can be verified.
       }
-      throw error;
+      throw failure;
     }
-    return { manifest, revision, hash };
+    throw failure ?? new SyncError('uncertain', undefined, 'commit-marker');
   }
 
   private async publishPrepared(previous: Head, bytes: ArrayBuffer, hash: string): Promise<Head> {

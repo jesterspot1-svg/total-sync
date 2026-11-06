@@ -530,7 +530,7 @@ test('failed local theme update is retried without advancing that file baseline'
   assert.equal(b.local.text(path, 'desktop-config'), 'body { color: blue; }');
 });
 
-test('interrupted cloud commit leaves old bytes and a lock, with no blind retry', async t => {
+test('an unconfirmed cloud commit leaves old bytes and a lock after a bounded retry', async t => {
   const { a, b, server } = await setup(t);
   a.local.put('Keep.md', 'published');
   await a.run();
@@ -617,6 +617,53 @@ test('successful commit and lock removal can be verified after the server loses 
   assert.equal(b.local.text('Verified.md'), 'ready');
   assert.equal([...server.folders].some(path => path.endsWith('/metadata/lock')), false);
   assert.equal(server.requests.filter(row => row.method === 'DELETE' && row.path.endsWith('/metadata/lock')).length, 3);
+});
+
+test('legacy publication retries one missing write after a gateway timeout at each metadata step', async t => {
+  const { a, b, server, remote } = await setup(t);
+  const once = new Set<string>();
+  server.fault = (method, path) => {
+    if (!((method === 'MKCOL' && /\/metadata\/(lock|revisions\/1|commits\/1)$/.test(path))
+      || (method === 'PUT' && path.endsWith('/metadata/revisions/1/index.json'))) || once.has(path)) return undefined;
+    once.add(path);
+    return { status: 504 };
+  };
+  a.local.put('Retry metadata.md', 'synthetic');
+  assert.equal((await a.run()).counts.push, 1);
+  assert.equal(once.size, 4);
+  assert.equal((await remote.head(null)).revision, 1);
+  assert.equal((await b.run()).counts.pull, 1);
+  assert.equal(b.local.text('Retry metadata.md'), 'synthetic');
+});
+
+test('a stored index is verified without another PUT when the gateway lost its reply', async t => {
+  const { a, server, remote } = await setup(t);
+  const index = '/metadata/revisions/1/index.json';
+  server.afterMutation = (method, path) => method === 'PUT' && path.endsWith(index) ? { status: 504 } : undefined;
+  let readFailed = false;
+  server.fault = (method, path) => {
+    if (method !== 'GET' || !path.endsWith(index) || readFailed) return undefined;
+    readFailed = true;
+    return { status: 504 };
+  };
+  a.local.put('Stored index.md', 'synthetic');
+  await a.run();
+  assert.ok(readFailed);
+  assert.equal(server.requests.filter(row => row.method === 'PUT' && row.path.endsWith(index)).length, 1);
+  assert.equal((await remote.head(null)).revision, 1);
+});
+
+test('an ambiguous lock acquisition reports its phase and preserves the existing lock', async t => {
+  const { a, server, remote } = await setup(t);
+  const lock = '/metadata/lock';
+  const start = server.requests.length;
+  server.afterMutation = (method, path) => method === 'MKCOL' && path.endsWith(lock) ? { status: 504 } : undefined;
+  a.local.put('Unknown lock owner.md', 'synthetic');
+  await assert.rejects(a.run(), error => error instanceof SyncError
+    && error.code === 'uncertain' && error.status === 504 && error.phase === 'lock-acquire');
+  assert.ok([...server.folders].some(path => path.endsWith(lock)));
+  assert.equal(server.requests.slice(start).some(row => row.method === 'PUT' || row.method === 'DELETE'), false);
+  assert.equal((await remote.head(null)).revision, 0);
 });
 
 test('a refused unlock reports the distinct error and leaves committed data available', async t => {

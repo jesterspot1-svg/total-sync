@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.12 · Test prerelease
+
+- Verify cloud metadata after a gateway timeout during legacy publication. Retry a missing write once and keep uncertain lock ownership protected.
+- Include the failed write phase in diagnostic output for legacy locks, revision reservation, index storage and commit markers.
+
 ## 0.1.11 · Test prerelease
 
 - Publish large uploads of new files in batches of up to 24 operations. Upload and verify each file before taking the legacy write lock for its batch.

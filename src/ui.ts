@@ -479,7 +479,8 @@ export class SettingsTab extends PluginSettingTab {
     const data = [
       'TotalSync ' + this.plugin.manifest.version,
       'profile=' + this.plugin.profile,
-      ...this.plugin.log.map(item => new Date(item.at).toISOString() + ' ' + item.event + (item.status ? ' HTTP ' + item.status : '')),
+      ...this.plugin.log.map(item => new Date(item.at).toISOString() + ' ' + item.event
+        + (item.status ? ' HTTP ' + item.status : '') + (item.phase ? ' phase=' + item.phase : '')),
     ].join('\n');
     const area = modal.contentEl.createEl('textarea', { attr: { rows: '12', readonly: '', 'aria-label': label } });
     area.style.width = '100%';
