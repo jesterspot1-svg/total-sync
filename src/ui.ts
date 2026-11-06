@@ -50,6 +50,15 @@ export function notifyMarkdownConflicts(plugin: TotalSync): void {
   const notice = new Notice(content, 9000);
 }
 
+function showVersionPreviews(container: HTMLElement, local: string, remote: string): void {
+  const versions = container.createDiv({ cls: 'total-sync-conflict-versions' });
+  for (const [label, text] of [[t('This device', 'Это устройство'), local], [t('Cloud', 'Облако'), remote]] as const) {
+    const panel = versions.createDiv();
+    panel.createEl('strong', { text: label });
+    panel.createEl('pre', { text });
+  }
+}
+
 export function showMarkdownConflicts(plugin: TotalSync): void {
   const modal = new Modal(plugin.app);
   modal.setTitle(t('TotalSync conflicts', 'Конфликты TotalSync'));
@@ -63,6 +72,22 @@ export function showMarkdownConflicts(plugin: TotalSync): void {
         modal.close();
         const editor = new Modal(plugin.app);
         editor.setTitle(path);
+        if (review.kind === 'whole') {
+          editor.contentEl.createEl('p', { text: t(
+            'These previews show the first difference. Choose which full version to save. Both originals are available in History.',
+            'Здесь показано начало расхождения. Выберите, какую версию сохранить целиком. Обе исходные версии доступны в истории.',
+          ) });
+          const empty = t('(empty)', '(пусто)');
+          showVersionPreviews(editor.contentEl, review.previews.local || empty, review.previews.remote || empty);
+          const save = async (kind: 'local' | 'remote') => {
+            if (await plugin.resolveConflict(review, { kind })) editor.close();
+          };
+          new Setting(editor.contentEl)
+            .addButton(btn => btn.setButtonText(t('Save device version', 'Сохранить версию с этого устройства')).onClick(() => save('local')))
+            .addButton(btn => btn.setButtonText(t('Save cloud version', 'Сохранить версию из облака')).onClick(() => save('remote')));
+          editor.open();
+          return;
+        }
         editor.contentEl.createEl('p', { text: t(
           'Choose or edit each disputed fragment. Compatible edits are already combined.',
           'Выберите или отредактируйте каждый спорный фрагмент. Совместимые правки уже объединены.',
@@ -73,15 +98,9 @@ export function showMarkdownConflicts(plugin: TotalSync): void {
         for (const [i, part] of disputed.entries()) {
           const title = t('Fragment', 'Фрагмент') + ' ' + (i + 1);
           editor.contentEl.createEl('h3', { text: title });
-          const versions = editor.contentEl.createDiv({ cls: 'total-sync-conflict-versions' });
-          for (const [label, lines] of [
-            [t('This device', 'Это устройство'), part.local],
-            [t('Cloud', 'Облако'), part.remote],
-          ] as const) {
-            const panel = versions.createDiv();
-            panel.createEl('strong', { text: label });
-            panel.createEl('pre', { text: lines.length ? lines.join('\n') : t('(deleted)', '(удалено)') });
-          }
+          const deleted = t('(deleted)', '(удалено)');
+          showVersionPreviews(editor.contentEl, part.local.length ? part.local.join('\n') : deleted,
+            part.remote.length ? part.remote.join('\n') : deleted);
           const area = editor.contentEl.createEl('textarea', {
             cls: 'total-sync-conflict-editor', attr: { rows: '4', 'aria-label': t('Result for', 'Итог для') + ' ' + title },
           });
@@ -105,7 +124,7 @@ export function showMarkdownConflicts(plugin: TotalSync): void {
             if (choices.size !== disputed.length) return;
             const text = review.merge.parts.flatMap(part => part.kind === 'text' ? part.lines : choices.get(part)!)
               .join(review.merge.eol);
-            if (await plugin.resolveConflict(review, text)) editor.close();
+            if (await plugin.resolveConflict(review, { kind: 'text', text })) editor.close();
           });
           refreshSave();
         });

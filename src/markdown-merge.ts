@@ -23,6 +23,24 @@ export function markdownText(bytes: ArrayBuffer): string | undefined {
   }
 }
 
+export function markdownPreviews(local: ArrayBuffer, remote: ArrayBuffer): { local: string; remote: string } {
+  const a = new Uint8Array(local);
+  const b = new Uint8Array(remote);
+  const shared = Math.min(a.length, b.length);
+  let firstChange = 0;
+  while (firstChange < shared && a[firstChange] === b[firstChange]) firstChange++;
+  const previewDecoder = new TextDecoder();
+  const preview = (bytes: Uint8Array) => {
+    let start = Math.max(0, firstChange - 512);
+    const end = Math.min(bytes.length, firstChange + 1536);
+    while (start < end && (bytes[start]! & 0xc0) === 0x80) start++;
+    const text = previewDecoder.decode(bytes.subarray(start, end), { stream: end < bytes.length });
+    previewDecoder.decode();
+    return (start > 0 ? '…\n' : '') + text + (end < bytes.length ? '\n…' : '');
+  };
+  return { local: preview(a), remote: preview(b) };
+}
+
 const equal = (a: string[], b: string[]) => a.length === b.length && a.every((line, i) => line === b[i]);
 
 function edits(base: string[], target: string[]): Edit[] | undefined {

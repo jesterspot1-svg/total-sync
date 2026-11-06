@@ -3,7 +3,7 @@ import {
   type Channel, type Checkpoint, type HistoryItem, type LocalEntry, type LocalFiles,
   type Manifest, type PendingConflict, type RemoteEntry, type RemoteFile, type Scan, type SyncState, type Profile,
 } from './model';
-import { markdownText, maxMergeBytes, mergeMarkdown, type MarkdownMerge } from './markdown-merge';
+import { markdownPreviews, markdownText, maxMergeBytes, mergeMarkdown, type MarkdownMerge } from './markdown-merge';
 import { checkPayload, EXCALIDRAW_PROFILE, pathKey } from './policy';
 import { planSync, type Action, type Operation, type Plan, type Selection } from './planner';
 import { RemoteVault, type Head } from './repository';
@@ -30,11 +30,14 @@ export interface Result {
   newConflicts: number;
 }
 
-export interface ConflictReview {
-  path: string;
-  pending: PendingConflict;
-  merge: MarkdownMerge;
-}
+export type ConflictReview = { path: string; pending: PendingConflict } & (
+  | { kind: 'fragments'; merge: MarkdownMerge }
+  | { kind: 'whole'; previews: ReturnType<typeof markdownPreviews> }
+);
+
+export type ConflictChoice = { kind: 'text'; text: string } | { kind: 'local' | 'remote' };
+
+type ConflictBytes = { local: ArrayBuffer; remote: ArrayBuffer };
 
 type Inspection = Preview & { scans: Map<Channel, Scan> };
 type CloudWork = {
@@ -197,14 +200,16 @@ export class SyncEngine {
     await this.local.apply(op.channel, op.path, stamp(op.local), entry?.kind === 'deleted' ? null : entry ?? null, bytes);
   }
 
-  private async markdownVersions(op: Operation, manifest: Manifest) {
-    if (op.channel !== 'content' || !/\.md$/i.test(op.path) || op.local?.kind !== 'file' || op.remote?.kind !== 'file'
-      || op.local.size > maxMergeBytes || op.remote.size > maxMergeBytes) return undefined;
+  private async markdownBytes(op: Operation, remote: RemoteFile): Promise<ConflictBytes> {
     const [{ bytes: localBytes }, remoteBytes] = await Promise.all([
-      this.verifiedLocal(op), this.bytes('content', op.path, op.remote),
+      this.verifiedLocal(op), this.bytes('content', op.path, remote),
     ]);
-    const local = markdownText(localBytes);
-    const remote = markdownText(remoteBytes);
+    return { local: localBytes, remote: remoteBytes };
+  }
+
+  private async compareMarkdown(op: Operation, manifest: Manifest, versions: ConflictBytes): Promise<MarkdownMerge | undefined> {
+    const local = markdownText(versions.local);
+    const remote = markdownText(versions.remote);
     if (local === undefined || remote === undefined) return undefined;
     const ancestor = manifest.history.find(item => item.channel === 'content' && item.path === op.path
       && item.file.hash === op.baseHash && item.file.size <= maxMergeBytes);
@@ -216,7 +221,7 @@ export class SyncEngine {
         if (!(error instanceof SyncError) || !['missing', 'integrity'].includes(error.code)) throw error;
       }
     }
-    return { localBytes, merge: mergeMarkdown(base, local, remote) };
+    return mergeMarkdown(base, local, remote);
   }
 
   private async archiveMarkdown(manifest: Manifest, op: Operation, localBytes: ArrayBuffer, now: number): Promise<RemoteFile> {
@@ -339,14 +344,15 @@ export class SyncEngine {
       try {
         if (op.action === 'conflict' && op.local?.kind === 'file' && op.remote?.kind === 'file') {
           if (op.channel === 'content') {
-            const markdown = await this.markdownVersions(op, manifest);
-            if (markdown) {
+            if (/\.md$/i.test(op.path)) {
+              const versions = await this.markdownBytes(op, op.remote);
+              const merge = await this.compareMarkdown(op, manifest, versions);
               const historySize = manifest.history.length;
-              const local = await this.archiveMarkdown(manifest, op, markdown.localBytes, now);
-              if (markdown.merge.parts.some(part => part.kind === 'conflict')) {
+              const local = await this.archiveMarkdown(manifest, op, versions.local, now);
+              if (!merge || merge.parts.some(part => part.kind === 'conflict')) {
                 work.pending.set(op, { local: op.local.hash, remote: op.remote.hash, base: op.baseHash ?? null });
               } else {
-                const bytes = encode(markdown.merge.parts.flatMap(part => part.kind === 'text' ? part.lines : []).join(markdown.merge.eol));
+                const bytes = encode(merge.parts.flatMap(part => part.kind === 'text' ? part.lines : []).join(merge.eol));
                 const file = await this.mergedFile(bytes, local, op.remote, now);
                 group[op.path] = file;
                 work.merges.set(op, file);
@@ -487,7 +493,7 @@ export class SyncEngine {
     return { state: next, counts, errors, desktopChanged, devices: manifest.devices, merged, newConflicts };
   }
 
-  private async pendingOperation(path: string, pending: PendingConflict, head: Head): Promise<Operation> {
+  private async pendingOperation(path: string, pending: PendingConflict, head: Head): Promise<Operation & { remote: RemoteFile }> {
     if (!this.options.selection.channels.includes('content')) throw new SyncError('configuration');
     const scan = await this.local.scan('content');
     const local = scan.entries.get(path);
@@ -503,33 +509,36 @@ export class SyncEngine {
       if (!pending) throw new SyncError('changed');
       const head = await this.remote.head(state.checkpoint, true);
       const op = await this.pendingOperation(path, pending, head);
-      const versions = await this.markdownVersions(op, head.manifest);
-      if (!versions) throw new SyncError('changed');
-      return { path, pending, merge: versions.merge };
+      const versions = await this.markdownBytes(op, op.remote);
+      const merge = await this.compareMarkdown(op, head.manifest, versions);
+      if (merge) return { path, pending, kind: 'fragments', merge };
+      return { path, pending, kind: 'whole', previews: markdownPreviews(versions.local, versions.remote) };
     });
   }
 
-  resolveConflict(state: SyncState, review: ConflictReview, text: string): Promise<SyncState> {
+  resolveConflict(state: SyncState, review: ConflictReview, choice: ConflictChoice): Promise<SyncState> {
     return this.exclusive(async () => {
       const { path, pending: expected } = review;
       const pending = state.pending?.[path];
       if (!pending || pending.local !== expected.local || pending.remote !== expected.remote || pending.base !== expected.base) {
         throw new SyncError('changed');
       }
-      const bytes = encode(text);
-      if (bytes.byteLength > Math.min(2 * maxMergeBytes, this.options.maxBytes)) throw new SyncError('size');
+      const edited = choice.kind === 'text' ? encode(choice.text) : undefined;
+      if (edited && (review.kind !== 'fragments' || edited.byteLength > Math.min(2 * maxMergeBytes, this.options.maxBytes))) {
+        throw new SyncError('size');
+      }
       const head = await this.remote.head(state.checkpoint, true);
       const op = await this.pendingOperation(path, pending, head);
-      const versions = await this.markdownVersions(op, head.manifest);
-      if (!versions || op.remote?.kind !== 'file') throw new SyncError('changed');
-      const remote = op.remote;
+      const versions = await this.markdownBytes(op, op.remote);
+      const bytes = edited ?? (choice.kind === 'local' ? versions.local : versions.remote);
       const now = this.now();
       const { latest, file } = await this.remote.write(async () => {
         const current = await this.remote.headForWrite(head);
         if (current.hash !== head.hash) throw new SyncError('cloud-advanced');
         await this.local.verify('content', path, 'file:' + pending.local);
-        const local = await this.archiveMarkdown(current.manifest, op, versions.localBytes, now);
-        const file = await this.mergedFile(bytes, local, remote, now);
+        const local = await this.archiveMarkdown(current.manifest, op, versions.local, now);
+        const file = choice.kind === 'local' ? local : choice.kind === 'remote' ? op.remote
+          : await this.mergedFile(bytes, local, op.remote, now);
         current.manifest.files.content[path] = file;
         current.manifest.at = now;
         this.active();

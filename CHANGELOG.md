@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.7 · Test prerelease
+
+- Keep Markdown conflicts in the original note even when a version exceeds the automatic merge limit. Review a preview of the first difference, choose either full version and recover both originals from history.
+
 ## 0.1.6 · Test prerelease
 
 - Merge independent Markdown edits into the original note. Review overlapping edits in Obsidian and recover the two originals from history.

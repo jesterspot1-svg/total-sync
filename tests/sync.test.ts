@@ -86,19 +86,77 @@ test('overlapping Markdown edits survive in history and resolve in the original 
   assert.equal((await owner.run()).counts.review, 1);
   owner.state = JSON.parse(JSON.stringify(owner.state));
   const review = await owner.engine.reviewConflict(owner.state, 'Конфликт.md');
+  assert.equal(review.kind, 'fragments');
   assert.equal(review.merge.parts.filter(part => part.kind === 'conflict').length, 1);
   const archived = new Set<string>();
   for (const item of (await owner.engine.history(owner.state)).filter(row => row.reason === 'conflict')) {
     await owner.engine.restore(owner.state, item.id, async (_item, data) => { archived.add(decode(data)); });
   }
   assert.deepEqual(archived, new Set(['laptop edit', 'PC edit']));
-  owner.state = await owner.engine.resolveConflict(owner.state, review, 'laptop edit\nPC edit');
+  owner.state = await owner.engine.resolveConflict(owner.state, review, { kind: 'text', text: 'laptop edit\nPC edit' });
   for (const client of [a, b]) {
     await client.run();
     assert.deepEqual([...client.local.group('content').keys()], ['Конфликт.md']);
     assert.equal(client.local.text('Конфликт.md'), 'laptop edit\nPC edit');
     assert.equal(client.state.pending?.['Конфликт.md'], undefined);
   }
+});
+
+test('large Markdown conflicts retain both originals in history and save either full version without copies', async t => {
+  const { a, mobile } = await setup(t);
+  const path = 'Большая заметка.MD';
+  const prefix = 'Строка для теста синхронизации.\r\n'.repeat(10_000);
+  assert.ok(encode(prefix).byteLength > 512 * 1024);
+  a.local.put(path, prefix + 'Исходная строка');
+  await a.run();
+  await mobile.run();
+
+  for (const kind of ['local', 'remote'] as const) {
+    const laptop = prefix + 'Строка Windows ' + kind;
+    const phone = prefix + 'Строка iPhone ' + kind;
+    a.local.put(path, laptop);
+    mobile.local.put(path, phone);
+    await a.run();
+    assert.equal((await mobile.run()).counts.review, 1);
+    assert.equal(mobile.local.text(path), phone);
+    assert.deepEqual([...mobile.local.group('content').keys()], [path]);
+    const review = await mobile.engine.reviewConflict(mobile.state, path);
+    assert.equal(review.kind, 'whole');
+    assert.match(review.previews.local, /Строка iPhone/);
+    assert.match(review.previews.remote, /Строка Windows/);
+    assert.ok(review.previews.local.length < 2200 && review.previews.remote.length < 2200);
+    mobile.state = await mobile.engine.resolveConflict(mobile.state, review, { kind });
+    await a.run();
+    for (const client of [a, mobile]) {
+      assert.deepEqual([...client.local.group('content').keys()], [path]);
+      assert.equal(client.local.text(path), kind === 'local' ? phone : laptop);
+    }
+    const archived = new Set<string>();
+    for (const item of (await mobile.engine.history(mobile.state)).filter(row => row.path === path && row.reason === 'conflict')) {
+      await mobile.engine.restore(mobile.state, item.id, async (_item, data) => { archived.add(decode(data)); });
+    }
+    assert.ok(archived.has(phone) && archived.has(laptop));
+  }
+});
+
+test('Markdown with unsupported encoding can be resolved with byte-exact versions and no copies', async t => {
+  const { a, b } = await setup(t);
+  const path = 'Encoded.md';
+  const local = Uint8Array.from([255, 97]).buffer;
+  const cloud = Uint8Array.from([255, 98]).buffer;
+  a.local.put(path, 'base');
+  await a.run();
+  await b.run();
+  a.local.put(path, cloud);
+  b.local.put(path, local);
+  await a.run();
+  assert.equal((await b.run()).counts.review, 1);
+  const review = await b.engine.reviewConflict(b.state, path);
+  assert.equal(review.kind, 'whole');
+  b.state = await b.engine.resolveConflict(b.state, review, { kind: 'local' });
+  await a.run();
+  assert.deepEqual([...a.local.group('content').keys()], [path]);
+  assert.deepEqual(await a.local.read('content', path), local);
 });
 
 test('configuration conflict keeps the active setting and archives both exact JSON files', async t => {
@@ -503,7 +561,7 @@ test('the resolver refuses to overwrite a note that changed after opening the re
   const review = await b.engine.reviewConflict(b.state, 'Stale.md');
   a.local.put('Stale.md', 'newer cloud');
   await a.run();
-  await assert.rejects(b.engine.resolveConflict(b.state, review, 'old choice'), fails('changed'));
+  await assert.rejects(b.engine.resolveConflict(b.state, review, { kind: 'text', text: 'old choice' }), fails('changed'));
   assert.equal(b.local.text('Stale.md'), 'local');
   assert.equal(a.local.text('Stale.md'), 'newer cloud');
   assert.equal((await b.run()).counts.review, 1);

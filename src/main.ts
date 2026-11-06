@@ -1,5 +1,5 @@
 import { Notice, Platform, Plugin, TFile, requestUrl, type TAbstractFile } from 'obsidian';
-import { SyncEngine, type ConflictReview } from './engine';
+import { SyncEngine, type ConflictChoice, type ConflictReview } from './engine';
 import { Fingerprints } from './fingerprints';
 import { errorText, interfaceLocale, t } from './i18n';
 import { validState } from './manifest';
@@ -346,10 +346,10 @@ export default class TotalSync extends Plugin {
     return this.operate(() => this.engine().reviewConflict(this.state, path));
   }
 
-  async resolveConflict(review: ConflictReview, text: string): Promise<boolean> {
+  async resolveConflict(review: ConflictReview, choice: ConflictChoice): Promise<boolean> {
     return !!await this.operate(async () => {
       if (!this.allowed()) throw new SyncError(this.stateError ? 'integrity' : 'inactive');
-      const state = await this.engine().resolveConflict(this.state, review, text);
+      const state = await this.engine().resolveConflict(this.state, review, choice);
       await this.saveData({ binding: this.config.binding, device: this.config.device, state, lastSuccess: this.lastSuccess });
       this.state = state;
       this.record('markdown-conflict-resolved');

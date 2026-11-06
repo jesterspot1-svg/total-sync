@@ -150,7 +150,7 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   assert.equal(plugin.config.enabled, false);
   assert.equal(plugin.config.binding, '');
   assert.ok(plugin.commands.some(command => command.id === 'sync-now'));
-  const review = { path: 'Note.md', merge: { eol: '\n', parts: [
+  let review = { path: 'Note.md', kind: 'fragments', merge: { eol: '\n', parts: [
     { kind: 'text', lines: ['Before'] },
     { kind: 'conflict', local: ['Phone'], remote: ['Laptop'] },
     { kind: 'conflict', local: ['This'], remote: ['Cloud'] },
@@ -177,8 +177,18 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   secondArea.input();
   assert.equal(save.disabled, false);
   await save.click();
-  assert.equal(resolution, 'Before\nLaptop\nPhone\nEdited\nAfter\n');
+  assert.deepEqual({ ...resolution }, { kind: 'text', text: 'Before\nLaptop\nPhone\nEdited\nAfter\n' });
   assert.equal(editor.closed, true);
+  review = { path: 'Large.md', kind: 'whole', previews: { local: 'From phone', remote: 'From laptop' } };
+  plugin.commands.find(command => command.id === 'resolve-conflicts').callback();
+  await modals[2].contentEl.children[0].controls[0].click();
+  const largeEditor = modals[3];
+  assert.equal(largeEditor.contentEl.children.some(child => child.tag === 'textarea'), false);
+  const largeControls = largeEditor.contentEl.children.find(child => child instanceof Setting).controls;
+  assert.equal(largeControls.length, 2);
+  await largeControls[1].click();
+  assert.deepEqual({ ...resolution }, { kind: 'remote' });
+  assert.equal(largeEditor.closed, true);
   plugin.pendingConflicts = pendingConflicts;
   const indicator = body.children.find(node => node.cls?.includes('total-sync-feedback'));
   const badge = indicator.children[0];
