@@ -39,6 +39,7 @@ class Control {
 
 class Setting {
   controls = [];
+  infoEl = new Element();
   constructor(container) { container.children.push(this); }
   setName(name) { this.name = name; return this; }
   setClass(cls) { this.cls = cls; return this; }
@@ -152,6 +153,12 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   assert.equal(plugin.config.enabled, false);
   assert.equal(plugin.config.binding, '');
   assert.ok(plugin.commands.some(command => command.id === 'sync-now'));
+  const settingsActions = all.filter(row => row.cls === 'total-sync-button-row');
+  assert.deepEqual(settingsActions.map(row => row.controls.length), [1, 3, 3, 2]);
+  assert.ok(settingsActions.every(row => row.infoEl.hidden === !row.name));
+  assert.deepEqual(settingsActions[2].controls.map(control => control.label), mobile
+    ? ['Sync now', 'Show sync plan', 'Resolve conflicts']
+    : ['Синхронизировать сейчас', 'Показать план операций', 'Разобрать конфликты']);
   let review = { path: 'Note.md', kind: 'fragments', merge: { eol: '\n', parts: [
     { kind: 'text', lines: ['Before'] },
     { kind: 'conflict', local: ['Phone'], remote: ['Laptop'] },
@@ -171,7 +178,7 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   const [, editor] = modals;
   assert.equal(list.closed, true);
   const rows = editor.contentEl.children.filter(child => child instanceof Setting);
-  assert.ok(rows.every(row => row.cls === 'total-sync-conflict-actions'));
+  assert.ok(rows.every(row => row.cls === 'total-sync-button-row' && row.infoEl.hidden));
   const save = rows[2].controls[0];
   assert.equal(save.disabled, true);
   rows[0].controls[2].click();
@@ -189,7 +196,7 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   const largeEditor = modals[3];
   assert.equal(largeEditor.modalEl.cls, 'total-sync-conflict-dialog');
   assert.equal(largeEditor.contentEl.children.some(child => child.tag === 'textarea'), false);
-  const largeControls = largeEditor.contentEl.children.find(child => child.cls === 'total-sync-conflict-actions').controls;
+  const largeControls = largeEditor.contentEl.children.find(child => child.cls === 'total-sync-button-row').controls;
   assert.equal(largeControls.length, 2);
   await largeControls[1].click();
   assert.deepEqual({ ...resolution }, { kind: 'remote' });

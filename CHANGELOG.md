@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.9 · Test prerelease
+
+- Fit all three sync actions on the mobile TotalSync settings page. Apply the same vertical button layout to connection, recovery and confirmation controls.
+
 ## 0.1.8 · Test prerelease
 
 - Stack conflict review buttons on mobile, wrap long labels and limit preview height. Keep the floating sync badge clear of the review dialog.

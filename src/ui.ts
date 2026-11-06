@@ -59,6 +59,13 @@ function showVersionPreviews(container: HTMLElement, local: string, remote: stri
   }
 }
 
+function buttonRow(container: HTMLElement, name?: string): Setting {
+  const row = new Setting(container).setClass('total-sync-button-row');
+  if (name) row.setName(name);
+  else row.infoEl.hidden = true;
+  return row;
+}
+
 export function showMarkdownConflicts(plugin: TotalSync): void {
   const modal = new Modal(plugin.app);
   modal.modalEl.addClass('total-sync-conflict-dialog');
@@ -84,7 +91,7 @@ export function showMarkdownConflicts(plugin: TotalSync): void {
           const save = async (kind: 'local' | 'remote') => {
             if (await plugin.resolveConflict(review, { kind })) editor.close();
           };
-          new Setting(editor.contentEl).setClass('total-sync-conflict-actions')
+          buttonRow(editor.contentEl)
             .addButton(btn => btn.setButtonText(t('Save device version', 'Сохранить версию с этого устройства')).onClick(() => save('local')))
             .addButton(btn => btn.setButtonText(t('Save cloud version', 'Сохранить версию из облака')).onClick(() => save('remote')));
           editor.open();
@@ -115,12 +122,12 @@ export function showMarkdownConflicts(plugin: TotalSync): void {
             choices.set(part, area.value === '' ? [] : area.value.split('\n'));
             refreshSave();
           });
-          new Setting(editor.contentEl).setClass('total-sync-conflict-actions')
+          buttonRow(editor.contentEl)
             .addButton(control => control.setButtonText(t('Use this device', 'С этого устройства')).onClick(() => choose(part.local)))
             .addButton(control => control.setButtonText(t('Use cloud', 'Из облака')).onClick(() => choose(part.remote)))
             .addButton(control => control.setButtonText(t('Keep both', 'Обе версии')).onClick(() => choose([...part.remote, ...part.local])));
         }
-        new Setting(editor.contentEl).setClass('total-sync-conflict-actions').addButton(control => {
+        buttonRow(editor.contentEl).addButton(control => {
           refreshSave = () => { control.setDisabled(choices.size !== disputed.length); };
           control.setCta().setButtonText(t('Save merged note', 'Сохранить объединённую заметку')).onClick(async () => {
             if (choices.size !== disputed.length) return;
@@ -140,7 +147,7 @@ function confirm(app: App, title: string, description: string, label: string, ac
   const modal = new Modal(app);
   modal.setTitle(title);
   modal.contentEl.createEl('p', { text: description });
-  new Setting(modal.contentEl)
+  buttonRow(modal.contentEl)
     .addButton(btn => btn.setButtonText(t('Cancel', 'Отмена')).onClick(() => modal.close()))
     .addButton(btn => btn.setWarning().setButtonText(label).onClick(async () => {
       modal.close();
@@ -339,7 +346,7 @@ export class SettingsTab extends PluginSettingTab {
         text.onChange(value => { password = value; });
         clearPassword = () => { password = ''; text.setValue(''); };
       });
-    new Setting(el).setName(t('Connection and permissions', 'Соединение и права'))
+    buttonRow(el, t('Connection and permissions', 'Соединение и права'))
       .addButton(btn => btn.setButtonText(t('Check connection', 'Проверить подключение')).onClick(async () => {
         await plugin.verifyConnection(endpoint, login, password);
         clearPassword();
@@ -358,7 +365,7 @@ export class SettingsTab extends PluginSettingTab {
       });
     if (!plugin.config.binding) {
       let generated = '';
-      new Setting(el).setName(t('Set up a test vault', 'Подключение тестового хранилища'))
+      buttonRow(el, t('Set up a test vault', 'Подключение тестового хранилища'))
         .addButton(btn => btn.setButtonText(t('Generate ID', 'Создать ID')).onClick(() => {
           generated = crypto.randomUUID();
           writeId(generated);
@@ -379,7 +386,7 @@ export class SettingsTab extends PluginSettingTab {
           },
         )));
     } else {
-      new Setting(el).setName(t('Disconnect this vault', 'Отключить это хранилище'))
+      buttonRow(el, t('Disconnect this vault', 'Отключить это хранилище'))
         .addButton(btn => btn.setButtonText(t('Disconnect', 'Отключить')).onClick(() => confirm(
           plugin.app, t('Disconnect this vault', 'Отключить это хранилище'),
           t('Clears the local sync checkpoint and saved login. Existing vault files and cloud data are kept.',
@@ -396,7 +403,7 @@ export class SettingsTab extends PluginSettingTab {
         ['Adds a shortcut to run sync now.', 'Добавляет кнопку для ручного запуска.']);
     }
     const status = new Setting(el).setName(t('Status', 'Состояние'));
-    new Setting(el).addButton(btn => btn.setButtonText(t('Sync now', 'Синхронизировать сейчас')).onClick(() => plugin.sync(true)))
+    buttonRow(el).addButton(btn => btn.setButtonText(t('Sync now', 'Синхронизировать сейчас')).onClick(() => plugin.sync(true)))
       .addButton(btn => btn.setButtonText(t('Show sync plan', 'Показать план операций')).onClick(() => showPlan(plugin)))
       .addButton(btn => btn.setButtonText(t('Resolve conflicts', 'Разобрать конфликты')).onClick(() => showMarkdownConflicts(plugin)));
 
@@ -447,7 +454,7 @@ export class SettingsTab extends PluginSettingTab {
     this.number('retry', 'Initial retry delay (seconds)', 'Начальная задержка повтора (сек.)', 3, 300);
 
     new Setting(el).setName(t('Recovery and help', 'Восстановление и справка')).setHeading();
-    new Setting(el).addButton(btn => btn.setButtonText(t('History', 'История')).onClick(() => showHistory(plugin)))
+    buttonRow(el).addButton(btn => btn.setButtonText(t('History', 'История')).onClick(() => showHistory(plugin)))
       .addButton(btn => btn.setButtonText(t('Diagnostics', 'Диагностика')).onClick(() => this.diagnostics()));
     const help = el.createEl('p');
     help.createEl('a', { text: t('Beta test instructions', 'Инструкция для beta'), href: project + '/blob/main/docs/BETA_TEST_INSTRUCTION_RU.md' });
