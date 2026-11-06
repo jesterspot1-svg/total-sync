@@ -62,7 +62,8 @@ export class DavServer {
           for await (const chunk of request) chunks.push(chunk as Uint8Array);
           const data = Uint8Array.from(Buffer.concat(chunks)).buffer;
           this.files.set(path, data);
-          return send(201);
+          const reply = this.afterMutation?.(method, path);
+          return send(reply?.status ?? 201, reply?.body);
         }
         case 'DELETE':
           if (this.files.delete(path)) return send(204);

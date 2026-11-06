@@ -22,7 +22,7 @@ export function errorText(code: SyncError['code']): string {
     'cloud-unlock': ['The server did not confirm that the write lock was released.', 'Сервер не подтвердил снятие блокировки записи.'],
     'cloud-advanced': ['Another device published changes. TotalSync will recheck the plan.', 'Другое устройство опубликовало изменения. TotalSync пересчитает план.'],
     'cloud-preparing': ['A cloud revision is awaiting confirmation. TotalSync will recheck it.', 'Ревизия в облаке ждёт подтверждения. TotalSync повторит проверку.'],
-    'upload-retry': ['Upload interrupted before publication. TotalSync will retry.', 'Передача прервалась до публикации. TotalSync повторит отправку.'],
+    'upload-retry': ['Some uploads could not be verified. TotalSync will retry.', 'Часть отправок не подтверждена. TotalSync повторит отправку.'],
     integrity: ['Cloud or local sync metadata could not be verified. Stop and consult the test instructions.', 'Проверка метаданных не прошла. Остановитесь и сверьтесь с инструкцией.'],
     identity: ['Verify the vault ID. This ID may already be in use.', 'Проверьте ID хранилища. Возможно, он уже используется.'],
     path: ['A file name, case collision or path is incompatible.', 'Недопустимый путь, имя файла или совпадение без учёта регистра.'],

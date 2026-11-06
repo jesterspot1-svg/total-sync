@@ -433,7 +433,7 @@ export default class TotalSync extends Plugin {
         + ' blocked=' + n.blocked + ' checked=' + (n.equal + n.push + n.pull + n.conflict + n.review));
       if (!complete) {
         this.currentError = result.errors[0] ?? (n.review ? 'merge-conflict' : 'path');
-        this.record(this.currentError);
+        this.record(this.currentError, this.currentError === 'upload-retry' ? result.uploadRetryStatus : undefined);
         if (!controller.signal.aborted) this.retryAfterFailure(this.currentError);
       }
       if (result.newConflicts) notifyMarkdownConflicts(this);

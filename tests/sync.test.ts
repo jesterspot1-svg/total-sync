@@ -71,6 +71,63 @@ test('file progress counts verified uploads and applied downloads, without folde
   assert.deepEqual(events, [[0, 0]]);
 });
 
+test('a large upload publishes around one HTTP 504 and retries only the missing file', async t => {
+  const { a, server, id, remote } = await setup(t);
+  const lock = '/' + ROOT + '/vaults/' + id + '/metadata/lock';
+  for (let i = 0; i < 50; i++) a.local.put(`Note ${String(i).padStart(2, '0')}.md`, 'synthetic');
+  server.folders.add(lock);
+  assert.equal((await a.run()).counts.blocked, 50);
+  assert.equal(server.requests.some(request => request.method === 'PUT' && request.path.includes('/content/')), false);
+  server.folders.delete(lock);
+
+  let uploads = 0;
+  let uploadsUnderLock = 0;
+  server.fault = (method, path) => {
+    if (method !== 'PUT' || !path.includes('/content/')) return undefined;
+    if (server.folders.has(lock)) uploadsUnderLock++;
+    return ++uploads === 25 ? { status: 504 } : undefined;
+  };
+  const result = await a.run();
+  assert.equal(uploads, 50);
+  assert.equal(uploadsUnderLock, 0);
+  assert.equal(result.counts.push, 49);
+  assert.equal(result.counts.blocked, 1);
+  assert.deepEqual(result.errors, ['upload-retry']);
+  assert.equal(result.uploadRetryStatus, 504);
+  const head = await remote.head(null);
+  assert.equal(head.revision, 3);
+  assert.equal(Object.keys(head.manifest.files.content).length, 49);
+  assert.equal(server.folders.has(lock), false);
+  assert.equal((await a.run()).counts.push, 1);
+  assert.equal(uploads, 51);
+});
+
+test('repeated gateway timeouts stop a large upload after preserving the published batch', async t => {
+  const { a, server, remote } = await setup(t);
+  for (let i = 0; i < 50; i++) a.local.put(`Note ${String(i).padStart(2, '0')}.md`, 'synthetic');
+  let uploads = 0;
+  server.fault = (method, path) => method === 'PUT' && path.includes('/content/') && ++uploads > 24 ? { status: 504 } : undefined;
+  const result = await a.run();
+  assert.equal(uploads, 27);
+  assert.equal(result.counts.push, 24);
+  assert.equal(result.counts.blocked, 26);
+  const head = await remote.head(null);
+  assert.equal(Object.keys(head.manifest.files.content).length, 24);
+  assert.equal(head.hash, a.state.checkpoint?.hash);
+  server.fault = undefined;
+  assert.equal((await a.run()).counts.push, 26);
+  assert.equal(Object.keys((await remote.head(null)).manifest.files.content).length, 50);
+});
+
+test('a lost upload reply is accepted only if the cloud copy passes verification', async t => {
+  const { a, b, server } = await setup(t);
+  server.afterMutation = (method, path) => method === 'PUT' && path.includes('/content/') ? { status: 504 } : undefined;
+  a.local.put('Stored.md', 'confirmed bytes');
+  assert.equal((await a.run()).counts.push, 1);
+  await b.run();
+  assert.equal(b.local.text('Stored.md'), 'confirmed bytes');
+});
+
 test('stopping staged uploads releases the cloud lock and leaves the files available for retry', async t => {
   const { server, id, remote } = await setup(t);
   let controller = new AbortController();

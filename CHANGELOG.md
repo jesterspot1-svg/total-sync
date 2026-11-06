@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.11 · Test prerelease
+
+- Publish large uploads of new files in batches of up to 24 operations. Upload and verify each file before taking the legacy write lock for its batch.
+- Preserve published batches across gateway timeouts. Defer an individual unverified transfer and stop attempting further files after three consecutive timeouts. Verify a blob after an uncertain PUT reply before deciding whether it needs another upload.
+
 ## 0.1.10 · Test prerelease
 
 - Show completed file transfers out of the planned total in the sync badge.

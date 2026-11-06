@@ -33,6 +33,7 @@ export interface Result {
   desktopChanged: boolean;
   merged: number;
   newConflicts: number;
+  uploadRetryStatus?: number;
 }
 
 export type ConflictReview = { path: string; pending: PendingConflict } & (
@@ -53,13 +54,16 @@ type CloudWork = {
   pending: Map<Operation, PendingConflict>;
   unsafeDelete: Set<Channel>;
   transferred: () => void;
+  uploadRetryStatus?: number;
 };
 
 const transferBatch = 3;
 const smallFile = 2 * 1024 * 1024;
+const bulkBatch = 24;
+const bulkTimeoutLimit = 3;
 
-function* batches<T>(items: T[]): Generator<T[]> {
-  for (let i = 0; i < items.length; i += transferBatch) yield items.slice(i, i + transferBatch);
+function* batches<T>(items: T[], size = transferBatch): Generator<T[]> {
+  for (let i = 0; i < items.length; i += size) yield items.slice(i, i + size);
 }
 
 function ordered(ops: Operation[]): Operation[] {
@@ -151,6 +155,8 @@ export class SyncEngine {
       const report = this.options.controls?.progress;
       const total = ops.filter(op => (op.action === 'push' && op.local?.kind === 'file')
         || (op.action === 'pull' && op.remote?.kind === 'file')).length;
+      const bulk = !head.pending && total >= bulkBatch
+        && ops.every(op => op.action === 'equal' || op.action === 'blocked' || (op.action === 'push' && !op.remote));
       let completed = 0;
       report?.(completed, total);
       const needsLock = head.pending || head.manifest.devices[this.options.device] !== this.options.profile
@@ -164,22 +170,66 @@ export class SyncEngine {
       let readOnly = false;
       if (needsLock) {
         try {
-          this.active();
-          await this.remote.write(async () => {
-            const current = await this.remote.headForWrite(head, check);
-            if (current.hash !== head.hash) throw new SyncError('cloud-advanced');
-            // Read the manifest under the lock before modifying it. Keep the preview snapshot intact.
-            cloud.head = await this.commit(current, preview, ops, cloud, errors, now);
-          });
+          if (bulk) await this.pushBulk(preview, ops, cloud, errors, now);
+          else await this.writeBatch(preview, ops, cloud, errors, now);
         } catch (error) {
           if (!(error instanceof SyncError) || !['cloud-lock', 'cloud-preparing'].includes(error.code)) throw error;
-          readOnly = true;
+          readOnly = !bulk;
           errors.unshift(error.code);
+        }
+      }
+      if (bulk) {
+        for (const op of ops) {
+          if (op.action === 'push' && stamp(op.local) !== stamp(cloud.head.manifest.files[op.channel][op.path])) cloud.failed.add(op);
         }
       }
       this.active();
       return this.apply(state, preview, ops, cloud, errors, readOnly);
     });
+  }
+
+  private async writeBatch(
+    preview: Inspection, ops: Operation[], work: CloudWork, errors: Result['errors'], now: number,
+    staged?: ReadonlyMap<Operation, RemoteFile>,
+  ): Promise<void> {
+    this.active();
+    const expected = work.head;
+    await this.remote.write(async () => {
+      const current = await this.remote.headForWrite(expected, () => this.active());
+      if (current.hash !== expected.hash) throw new SyncError('cloud-advanced');
+      work.head = await this.commit(current, preview, ops, work, errors, now, staged);
+    });
+  }
+
+  private async pushBulk(preview: Inspection, ops: Operation[], work: CloudWork, errors: Result['errors'], now: number): Promise<void> {
+    this.active();
+    if (await this.remote.writesLocked()) throw new SyncError('cloud-lock');
+    const uploads = ops.filter(op => op.action === 'push');
+    let timeouts = 0;
+    for (const batch of batches(uploads, bulkBatch)) {
+      const staged = new Map<Operation, RemoteFile>();
+      for (const op of batch) {
+        this.active();
+        if (op.local?.kind !== 'file') continue;
+        try {
+          staged.set(op, await this.upload(op, now, work.transferred));
+          timeouts = 0;
+        } catch (error) {
+          if (!(error instanceof SyncError) || (error.code !== 'upload-retry' && error.code !== 'timeout' && error.status !== 504)) {
+            this.fileFailure(error, op, work.failed, errors);
+            continue;
+          }
+          work.failed.add(op);
+          work.uploadRetryStatus ??= error.status;
+          if (!errors.includes('upload-retry')) errors.unshift('upload-retry');
+          if (++timeouts >= bulkTimeoutLimit) break;
+        }
+      }
+      // The blobs are verified before taking the legacy write lock. Publish only this batch.
+      const ready = batch.filter(op => op.local?.kind === 'folder' || staged.has(op));
+      if (ready.length) await this.writeBatch(preview, ready, work, errors, now, staged);
+      if (timeouts >= bulkTimeoutLimit) break;
+    }
   }
 
   private archive(manifest: Manifest, op: Operation, file: RemoteFile, reason: HistoryItem['reason'], now: number): void {
@@ -346,6 +396,7 @@ export class SyncEngine {
 
   private async commit(
     head: Head, preview: Inspection, deferred: Operation[], work: CloudWork, errors: Result['errors'], now: number,
+    prepared?: ReadonlyMap<Operation, RemoteFile>,
   ): Promise<Head> {
     const manifest = head.manifest;
     const { failed, conflicts, unsafeDelete } = work;
@@ -354,7 +405,7 @@ export class SyncEngine {
     for (const path of preview.scans.get('content')?.entries.keys() ?? []) aliases.set(pathKey(path), path);
     let dirty = manifest.devices[this.options.device] !== this.options.profile;
     manifest.devices[this.options.device] = this.options.profile;
-    const staged = await this.stageSmallUploads(deferred, now, work, errors);
+    const staged = prepared ?? await this.stageSmallUploads(deferred, now, work, errors);
 
     for (const op of deferred) {
       this.active();
@@ -511,7 +562,8 @@ export class SyncEngine {
         counts.blocked++;
       }
     }
-    return { state: next, counts, errors, desktopChanged, devices: manifest.devices, merged, newConflicts };
+    return { state: next, counts, errors, desktopChanged, devices: manifest.devices, merged, newConflicts,
+      uploadRetryStatus: work.uploadRetryStatus };
   }
 
   private async pendingOperation(path: string, pending: PendingConflict, head: Head): Promise<Operation & { remote: RemoteFile }> {

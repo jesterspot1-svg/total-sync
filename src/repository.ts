@@ -115,6 +115,10 @@ export class RemoteVault {
     return this.exclusiveMove ? action() : this.lock(action);
   }
 
+  async writesLocked(): Promise<boolean> {
+    return !this.exclusiveMove && this.dav.collection(this.meta + '/lock');
+  }
+
   private async releaseLock(path: string): Promise<void> {
     try {
       await this.dav.remove(path);
@@ -293,9 +297,15 @@ export class RemoteVault {
     try {
       await this.dav.put(this.blobPath(channel, file.blob), bytes);
     } catch (error) {
-      // A late upload to a fresh UUID cannot change a published revision.
-      if (error instanceof SyncError && error.code === 'uncertain') throw new SyncError('upload-retry', error.status);
-      throw error;
+      if (!(error instanceof SyncError) || error.code !== 'uncertain') throw error;
+      try {
+        // A gateway timeout can arrive after Mail stored the complete blob.
+        await this.download(channel, file);
+        return file;
+      } catch {
+        // A late upload to a fresh UUID cannot change a published revision.
+        throw new SyncError('upload-retry', error.status);
+      }
     }
     await this.download(channel, file);
     return file;
