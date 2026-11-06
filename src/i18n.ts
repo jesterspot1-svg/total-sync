@@ -33,6 +33,7 @@ export function errorText(code: SyncError['code']): string {
     configuration: ['Check the settings. Some configuration files or credentials may be missing or unsupported.', 'Проверьте настройки. Конфигурация или учётные данные могут отсутствовать либо не поддерживаться.'],
     local: ['The local operation failed. Check free space and vault access.', 'Локальная операция не удалась. Проверьте свободное место и доступ к хранилищу.'],
     inactive: ['TotalSync is paused or the vault is closed.', 'TotalSync приостановлен или хранилище закрыто.'],
+    cancelled: ['Sync stopped', 'Синхронизация остановлена'],
   };
   return t(...messages[code]);
 }

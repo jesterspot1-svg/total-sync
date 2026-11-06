@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
 import { DOMParser } from '@xmldom/xmldom';
-import { SyncEngine } from '../src/engine';
+import { SyncEngine, type SyncControls } from '../src/engine';
 import { encode, newState, sha256, stamp, SyncError, type Channel, type LocalEntry, type LocalFiles, type Profile, type Scan, type Stamp, type SyncState } from '../src/model';
 import { RemoteVault } from '../src/repository';
 import { collectionResponse, MAIL, WebDav, type Request } from '../src/webdav';
@@ -213,11 +213,12 @@ export class Client {
 
   constructor(
     server: DavServer, id: string, profile: Profile = 'windows', maxBytes = 8 * 1024 * 1024,
-    exclusiveMove = false, excalidraw = false,
+    exclusiveMove = false, excalidraw = false, controls?: SyncControls,
   ) {
     const remote = new RemoteVault(server.dav(), id, exclusiveMove);
     this.engine = new SyncEngine(remote, this.local, {
       device: this.device, profile, maxBytes, active: () => true, now: () => server.clock,
+      controls,
       selection: { channels: profile === 'windows' ? ['content', 'desktop-config', 'shared-state'] : ['content', 'shared-state'],
         attachments: true, exclude: [], calendar: true, excalidraw },
     });

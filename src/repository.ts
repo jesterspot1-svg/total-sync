@@ -149,7 +149,8 @@ export class RemoteVault {
     return { manifest, revision, hash: await sha256(bytes) };
   }
 
-  async head(known: Checkpoint | null, publishedOnly = false): Promise<Head> {
+  async head(known: Checkpoint | null, publishedOnly = false, check?: () => void): Promise<Head> {
+    check?.();
     const start = known?.revision ?? 0;
     const [marker, first, next] = await Promise.allSettled([
       this.committed(start), this.read(start), this.revisionStatus(start + 1),
@@ -162,6 +163,7 @@ export class RemoteVault {
     if (known && known.hash !== current.hash) throw new SyncError('integrity');
     let status = next.value;
     while (status === 'committed') {
+      check?.();
       const [entry, following] = await Promise.all([
         this.read(current.revision + 1), this.revisionStatus(current.revision + 2),
       ]);
@@ -188,9 +190,10 @@ export class RemoteVault {
     return await this.committed(revision) ? 'committed' : 'reserved';
   }
 
-  async headForWrite(known: Checkpoint): Promise<Head> {
-    if (!this.exclusiveMove) return this.head(known);
-    const head = await this.head(known, true);
+  async headForWrite(known: Checkpoint, check?: () => void): Promise<Head> {
+    if (!this.exclusiveMove) return this.head(known, false, check);
+    const head = await this.head(known, true, check);
+    check?.();
     return head.pending ? this.finishPrepared(head) : head;
   }
 

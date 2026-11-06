@@ -52,6 +52,85 @@ test('empty vault downloads synthetic notes and all three devices create notes',
   assert.equal(Object.keys((await a.run()).devices).length, 3);
 });
 
+test('file progress counts verified uploads and applied downloads, without folders or deletions', async t => {
+  const { b, server, id } = await setup(t);
+  const events: Array<[number, number]> = [];
+  const a = new Client(server, id, 'mobile', undefined, false, false, {
+    signal: new AbortController().signal,
+    progress: (done, total) => events.push([done, total]),
+  });
+  b.local.put('Incoming.md', 'remote text');
+  await b.run();
+  a.local.put('Folder/Outgoing.md', 'local text');
+  a.local.put('Large.bin', new ArrayBuffer(2 * 1024 * 1024 + 1));
+  await a.run();
+  assert.deepEqual(events.splice(0), [[0, 3], [1, 3], [2, 3], [3, 3]]);
+  assert.equal(a.local.text('Incoming.md'), 'remote text');
+  a.local.group('content').delete('Large.bin');
+  assert.equal((await a.run()).counts['delete-remote'], 1);
+  assert.deepEqual(events, [[0, 0]]);
+});
+
+test('stopping staged uploads releases the cloud lock and leaves the files available for retry', async t => {
+  const { server, id, remote } = await setup(t);
+  let controller = new AbortController();
+  let stop = true;
+  const a = new Client(server, id, 'mobile', undefined, false, false, {
+    get signal() { return controller.signal; },
+    progress: done => { if (stop && done === 1) controller.abort(); },
+  });
+  for (let i = 0; i < 6; i++) a.local.put(`Note ${i}.md`, 'synthetic');
+  await assert.rejects(a.run(), fails('cancelled'));
+  assert.equal([...server.folders].some(path => path.endsWith('/metadata/lock')), false);
+  assert.equal((await remote.head(null)).revision, 0);
+  assert.equal(a.local.group('content').size, 6);
+  const uploads = server.requests.filter(request => request.method === 'PUT' && request.path.includes('/content/'));
+  assert.ok(uploads.length >= 1 && uploads.length <= 3);
+
+  stop = false;
+  controller = new AbortController();
+  assert.equal((await a.run()).counts.push, 6);
+  assert.equal(Object.keys((await remote.head(null)).manifest.files.content).length, 6);
+});
+
+test('stopping while a cloud revision is publishing finishes publication and releases its lock', async t => {
+  const { server, id, remote } = await setup(t);
+  let controller = new AbortController();
+  const a = new Client(server, id, 'mobile', undefined, false, false, {
+    get signal() { return controller.signal; },
+  });
+  server.afterMutation = (method, path) => {
+    if (method === 'MKCOL' && path.endsWith('/metadata/commits/1')) controller.abort();
+    return undefined;
+  };
+  a.local.put('Published.md', 'verified text');
+  await assert.rejects(a.run(), fails('cancelled'));
+  assert.equal([...server.folders].some(path => path.endsWith('/metadata/lock')), false);
+  const head = await remote.head(null);
+  assert.equal(head.revision, 1);
+  assert.equal(head.manifest.files.content['Published.md']?.kind, 'file');
+  controller = new AbortController();
+  assert.equal((await a.run()).counts.push, 0);
+});
+
+test('stopping downloads keeps the applied file and a retry receives the remaining files', async t => {
+  const { b, server, id } = await setup(t);
+  let controller = new AbortController();
+  let stop = true;
+  const a = new Client(server, id, 'mobile', undefined, false, false, {
+    get signal() { return controller.signal; },
+    progress: done => { if (stop && done === 1) controller.abort(); },
+  });
+  for (let i = 0; i < 3; i++) b.local.put(`Note ${i}.md`, 'synthetic');
+  await b.run();
+  await assert.rejects(a.run(), fails('cancelled'));
+  assert.equal(a.local.group('content').size, 1);
+  stop = false;
+  controller = new AbortController();
+  assert.equal((await a.run()).counts.pull, 2);
+  assert.equal(a.local.group('content').size, 3);
+});
+
 test('offline changes remain local until connection recovers', async t => {
   const { a, b, server } = await setup(t);
   a.local.put('Offline.md', 'before');

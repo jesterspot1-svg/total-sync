@@ -15,6 +15,11 @@ export interface EngineOptions {
   maxBytes: number;
   active: () => boolean;
   now?: () => number;
+  controls?: SyncControls;
+}
+export interface SyncControls {
+  signal: AbortSignal;
+  progress?: (completed: number, total: number) => void;
 }
 export interface Preview {
   plan: Plan;
@@ -47,6 +52,7 @@ type CloudWork = {
   merges: Map<Operation, RemoteFile>;
   pending: Map<Operation, PendingConflict>;
   unsafeDelete: Set<Channel>;
+  transferred: () => void;
 };
 
 const transferBatch = 3;
@@ -96,6 +102,7 @@ export class SyncEngine {
   constructor(private readonly remote: RemoteVault, private readonly local: LocalFiles, private readonly options: EngineOptions) {}
 
   private active(): void {
+    if (this.options.controls?.signal.aborted) throw new SyncError('cancelled');
     if (!this.options.active()) throw new SyncError('inactive');
   }
 
@@ -118,8 +125,9 @@ export class SyncEngine {
     const scans = new Map<Channel, Scan>();
     for (const channel of this.options.selection.channels) {
       this.active();
-      scans.set(channel, await this.local.scan(channel));
+      scans.set(channel, await this.local.scan(channel, () => this.active()));
     }
+    this.active();
     const plan = planSync(head.manifest, state, scans, this.options.selection);
     const destructive = plan.destructive.map(op =>
       JSON.stringify([op.channel, op.path, op.action, stamp(op.local), stamp(op.remote)])).sort();
@@ -132,26 +140,33 @@ export class SyncEngine {
 
   run(state: SyncState, approval?: string): Promise<Result> {
     return this.exclusive(async () => {
-      const head = await this.remote.head(state.checkpoint, true);
+      const check = () => this.active();
+      const head = await this.remote.head(state.checkpoint, true, check);
       const preview = await this.inspect(state, head);
       if (preview.plan.requiresApproval && preview.approval !== approval) throw new SyncError('mass-delete');
       const ops = ordered(preview.plan.operations);
       const errors: Result['errors'] = [...new Set([...preview.scans.values()].flatMap(scan => [...scan.issues ?? []]))];
       const now = this.now();
       const expiration = this.expiration(now);
+      const report = this.options.controls?.progress;
+      const total = ops.filter(op => (op.action === 'push' && op.local?.kind === 'file')
+        || (op.action === 'pull' && op.remote?.kind === 'file')).length;
+      let completed = 0;
+      report?.(completed, total);
       const needsLock = head.pending || head.manifest.devices[this.options.device] !== this.options.profile
         || ops.some(op => op.action === 'push' || op.action.startsWith('delete') || (op.action === 'conflict' && !!op.local))
         || head.manifest.garbage.length > 0
         || (expiration !== null && head.manifest.history.some(item => item.at <= expiration));
       const cloud: CloudWork = {
         head, failed: new Set(), conflicts: new Map(), merges: new Map(), pending: new Map(), unsafeDelete: new Set(),
+        transferred: () => report?.(++completed, total),
       };
       let readOnly = false;
       if (needsLock) {
         try {
           this.active();
           await this.remote.write(async () => {
-            const current = await this.remote.headForWrite(head);
+            const current = await this.remote.headForWrite(head, check);
             if (current.hash !== head.hash) throw new SyncError('cloud-advanced');
             // Read the manifest under the lock before modifying it. Keep the preview snapshot intact.
             cloud.head = await this.commit(current, preview, ops, cloud, errors, now);
@@ -162,6 +177,7 @@ export class SyncEngine {
           errors.unshift(error.code);
         }
       }
+      this.active();
       return this.apply(state, preview, ops, cloud, errors, readOnly);
     });
   }
@@ -181,10 +197,12 @@ export class SyncEngine {
     return { bytes, hash: op.local.hash };
   }
 
-  private async upload(op: Operation, now: number): Promise<RemoteFile> {
+  private async upload(op: Operation, now: number, transferred?: () => void): Promise<RemoteFile> {
     const { bytes, hash } = await this.verifiedLocal(op);
     this.active();
-    return this.remote.upload(op.channel, bytes, hash, this.options.device, now);
+    const file = await this.remote.upload(op.channel, bytes, hash, this.options.device, now);
+    transferred?.();
+    return file;
   }
 
   private async bytes(channel: Channel, path: string, entry: RemoteFile): Promise<ArrayBuffer> {
@@ -253,12 +271,13 @@ export class SyncEngine {
     return this.remote.upload('content', bytes, hash, this.options.device, now);
   }
 
-  private async stageSmallUploads(deferred: Operation[], now: number, failed: Set<Operation>, errors: Result['errors']) {
+  private async stageSmallUploads(deferred: Operation[], now: number, work: CloudWork, errors: Result['errors']) {
+    const { failed, transferred } = work;
     const files = deferred.filter(op => op.action === 'push' && op.local?.kind === 'file' && op.local.size <= smallFile);
     const staged = new Map<Operation, RemoteFile>();
     for (const batch of batches(files)) {
       this.active();
-      const results = await Promise.allSettled(batch.map(op => this.upload(op, now)));
+      const results = await Promise.allSettled(batch.map(op => this.upload(op, now, transferred)));
       for (const [index, result] of results.entries()) {
         const op = batch[index]!;
         if (result.status === 'fulfilled') staged.set(op, result.value);
@@ -335,7 +354,7 @@ export class SyncEngine {
     for (const path of preview.scans.get('content')?.entries.keys() ?? []) aliases.set(pathKey(path), path);
     let dirty = manifest.devices[this.options.device] !== this.options.profile;
     manifest.devices[this.options.device] = this.options.profile;
-    const staged = await this.stageSmallUploads(deferred, now, failed, errors);
+    const staged = await this.stageSmallUploads(deferred, now, work, errors);
 
     for (const op of deferred) {
       this.active();
@@ -384,7 +403,7 @@ export class SyncEngine {
         if (!op.local) continue;
         if (op.local.kind === 'folder') await this.local.verify(op.channel, op.path, 'folder');
         const next: RemoteEntry = op.local.kind === 'folder'
-          ? { kind: 'folder', at: now, device: this.options.device } : staged.get(op) ?? await this.upload(op, now);
+          ? { kind: 'folder', at: now, device: this.options.device } : staged.get(op) ?? await this.upload(op, now, work.transferred);
         if (op.channel === 'content') this.addParents(manifest, op.path, preview.scans.get('content'), now);
         if (op.remote?.kind === 'file') this.archive(manifest, op, op.remote, 'updated', now);
         group[op.path] = next;
@@ -398,6 +417,7 @@ export class SyncEngine {
     for (const op of deferred) {
       if (op.action !== 'delete-remote') continue;
       if (unsafeDelete.has(op.channel)) continue;
+      this.active();
       try {
         await this.local.verify(op.channel, op.path, null);
         if (op.remote?.kind === 'file') await this.remote.download(op.channel, op.remote);
@@ -485,6 +505,7 @@ export class SyncEngine {
         next.base[op.channel][op.path] = { local: localStamp, remote: stamp(current) };
         if (op.channel === 'content') delete next.pending[op.path];
         counts[op.action]++;
+        if (op.action === 'pull' && current?.kind === 'file') work.transferred();
       } catch (error) {
         this.fileFailure(error, op, failed, errors, true);
         counts.blocked++;

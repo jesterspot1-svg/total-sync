@@ -149,7 +149,7 @@ export class ObsidianFiles implements LocalFiles {
     this.actual.get('desktop-config')?.set(own, this.path('desktop-config', own));
   }
 
-  async scan(channel: Channel): Promise<Scan> {
+  async scan(channel: Channel, check?: () => void): Promise<Scan> {
     const scan: Scan = { entries: new Map(), blocked: new Set(), issues: new Set(), ignored: new Set() };
     this.actual.get(channel)?.clear();
     if (channel === 'content') {
@@ -163,6 +163,7 @@ export class ObsidianFiles implements LocalFiles {
       await this.configPaths(scan);
     }
     for (const [path] of this.actual.get(channel) ?? []) {
+      check?.();
       if (scan.entries.has(path) || scan.blocked.has(path)) continue;
       try {
         if (channel === 'content') {

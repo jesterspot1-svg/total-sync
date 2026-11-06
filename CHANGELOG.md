@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.10 · Test prerelease
+
+- Show completed file transfers out of the planned total in the sync badge.
+- Add a Stop button to the badge. Finish in-flight work safely, stop the current run and keep confirmed data available for the next run.
+
 ## 0.1.9 · Test prerelease
 
 - Fit all three sync actions on the mobile TotalSync settings page. Apply the same vertical button layout to connection, recovery and confirmation controls.

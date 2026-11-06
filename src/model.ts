@@ -11,7 +11,7 @@ export type ErrorCode =
   | 'auth' | 'forbidden' | 'missing' | 'rate' | 'server' | 'network' | 'timeout' | 'uncertain'
   | 'dav' | 'protocol' | 'busy' | 'cloud-lock' | 'cloud-unlock' | 'cloud-advanced' | 'cloud-preparing' | 'upload-retry'
   | 'integrity' | 'identity' | 'path' | 'changed'
-  | 'mass-delete' | 'merge-conflict' | 'size' | 'configuration' | 'local' | 'inactive';
+  | 'mass-delete' | 'merge-conflict' | 'size' | 'configuration' | 'local' | 'inactive' | 'cancelled';
 
 export class SyncError extends Error {
   constructor(readonly code: ErrorCode, readonly status?: number) {
@@ -80,7 +80,7 @@ export interface Scan {
   issues?: Set<ErrorCode>;
 }
 export interface LocalFiles {
-  scan(channel: Channel): Promise<Scan>;
+  scan(channel: Channel, check?: () => void): Promise<Scan>;
   read(channel: Channel, path: string): Promise<ArrayBuffer>;
   verify(channel: Channel, path: string, expected: Stamp): Promise<void>;
   apply(channel: Channel, path: string, expected: Stamp, next: LocalEntry | null, bytes?: ArrayBuffer): Promise<void>;

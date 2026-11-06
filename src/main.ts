@@ -1,5 +1,5 @@
 import { Notice, Platform, Plugin, TFile, requestUrl, type TAbstractFile } from 'obsidian';
-import { SyncEngine, type ConflictChoice, type ConflictReview } from './engine';
+import { SyncEngine, type ConflictChoice, type ConflictReview, type SyncControls } from './engine';
 import { Fingerprints } from './fingerprints';
 import { errorText, interfaceLocale, t } from './i18n';
 import { validState } from './manifest';
@@ -45,6 +45,7 @@ export default class TotalSync extends Plugin {
   private retryCount = 0;
   private changedWhileWorking = false;
   private feedback?: SyncFeedback;
+  private syncController?: AbortController;
   private ribbon?: HTMLElement;
   private statusItem?: HTMLElement;
   private statusTimer?: Timer;
@@ -116,7 +117,7 @@ export default class TotalSync extends Plugin {
     });
     this.app.workspace.onLayoutReady(() => {
       if (this.stopped) return;
-      this.feedback = new SyncFeedback(document.body, Platform.isMobile);
+      this.feedback = new SyncFeedback(document.body, Platform.isMobile, () => this.stopSync());
       if (!Platform.isMobile) {
         this.statusItem = this.addStatusBarItem();
         this.statusItem.addClass('total-sync-last-sync');
@@ -289,7 +290,7 @@ export default class TotalSync extends Plugin {
   }
 
   private scheduleRetry(delay: number): void {
-    if (!this.allowed() || this.retryTimer !== undefined) return;
+    if (!this.allowed() || this.syncController?.signal.aborted || this.retryTimer !== undefined) return;
     this.queued = true;
     this.refreshStatus();
     this.retryTimer = window.setTimeout(() => {
@@ -310,7 +311,7 @@ export default class TotalSync extends Plugin {
       prefixes(this.config.exclude), this.config.calendar, this.config.excalidraw, this.fingerprints);
   }
 
-  private engine(files = this.files()): SyncEngine {
+  private engine(files = this.files(), controls?: SyncControls): SyncEngine {
     if (!this.config.binding || this.stateError) throw new SyncError(this.stateError ? 'integrity' : 'identity');
     const credential = this.credentials();
     if (!credential) throw new SyncError('configuration');
@@ -318,6 +319,7 @@ export default class TotalSync extends Plugin {
     return new SyncEngine(remote, files, {
       device: this.config.device, profile: this.profile, maxBytes: this.maxBytes,
       active: () => !this.stopped && !this.suspended,
+      controls,
       selection: {
         channels: [
           ...(this.config.content ? ['content' as const] : []),
@@ -388,6 +390,19 @@ export default class TotalSync extends Plugin {
     });
   }
 
+  private stopSync(): void {
+    const controller = this.syncController;
+    if (!controller || controller.signal.aborted) return;
+    controller.abort();
+    this.feedback?.stopping();
+    window.clearTimeout(this.debounceTimer);
+    window.clearTimeout(this.retryTimer);
+    this.debounceTimer = undefined;
+    this.retryTimer = undefined;
+    this.queued = false;
+    this.changedWhileWorking = false;
+  }
+
   async sync(manual: boolean, approval?: string): Promise<void> {
     if (!this.allowed()) {
       if (manual) this.showSyncError(this.stateError ? 'integrity' : 'inactive');
@@ -397,9 +412,14 @@ export default class TotalSync extends Plugin {
       if (manual && !this.feedback?.running) new Notice(errorText('busy'));
       return;
     }
+    const controller = new AbortController();
+    this.syncController = controller;
     this.feedback?.start();
     const outcome = await this.operate(async () => {
-      const result = await this.engine().run(this.state, approval);
+      const result = await this.engine(undefined, {
+        signal: controller.signal,
+        progress: (completed, total) => this.feedback?.progress(completed, total),
+      }).run(this.state, approval);
       const complete = result.counts.blocked === 0 && result.counts.review === 0 && result.errors.length === 0;
       const lastSuccess = complete ? Date.now() : this.lastSuccess;
       await this.saveData({ binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess });
@@ -414,7 +434,7 @@ export default class TotalSync extends Plugin {
       if (!complete) {
         this.currentError = result.errors[0] ?? (n.review ? 'merge-conflict' : 'path');
         this.record(this.currentError);
-        this.retryAfterFailure(this.currentError);
+        if (!controller.signal.aborted) this.retryAfterFailure(this.currentError);
       }
       if (result.newConflicts) notifyMarkdownConflicts(this);
       if (n.conflict > result.merged) new Notice(t('TotalSync saved conflicting versions. Check conflict copies and history.', 'TotalSync сохранил конфликтующие версии. Проверьте копии и историю.'));
@@ -423,7 +443,7 @@ export default class TotalSync extends Plugin {
         error: complete ? null : this.currentError,
         changed: n.push + n.pull + n['delete-local'] + n['delete-remote'] + n.conflict > 0,
       };
-    }, false, true);
+    }, false, true).finally(() => { this.syncController = undefined; });
     if (this.stopped) return;
     if (this.suspended) {
       this.feedback?.clear();
@@ -443,7 +463,7 @@ export default class TotalSync extends Plugin {
 
   private showSyncError(code: SyncError['code']): void {
     const message = errorText(code);
-    if (this.feedback) this.feedback.finish('error', message);
+    if (this.feedback) this.feedback.finish(code === 'cancelled' ? 'cancelled' : 'error', message);
     else new Notice(message);
   }
 
@@ -462,13 +482,13 @@ export default class TotalSync extends Plugin {
       this.currentError = failure.code;
       this.record(failure.code, failure.status);
       if (notify) new Notice(errorText(failure.code));
-      if (retry) this.retryAfterFailure(failure.code);
+      if (retry && !this.syncController?.signal.aborted) this.retryAfterFailure(failure.code);
       return undefined;
     } finally {
       this.working = false;
       if (this.changedWhileWorking) {
         this.changedWhileWorking = false;
-        this.debounce();
+        if (!this.syncController?.signal.aborted) this.debounce();
       }
       this.refreshStatus();
     }

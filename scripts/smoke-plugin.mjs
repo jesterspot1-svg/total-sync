@@ -125,6 +125,7 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
     Date: class extends Date { static now() { return now; } },
     localStorage: { getItem: key => claims.get(key), setItem: (key, value) => claims.set(key, value) },
     crypto: globalThis.crypto,
+    AbortController,
     TextDecoder,
     TextEncoder,
   }, { filename: 'dist/main.js' });
@@ -204,7 +205,7 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   plugin.pendingConflicts = pendingConflicts;
   const indicator = body.children.find(node => node.cls?.includes('total-sync-feedback'));
   const badge = indicator.children[0];
-  const [icon, text] = badge.children;
+  const [icon, text, stop] = badge.children;
   assert.equal(indicator.attr.role, 'status');
   assert.equal(indicator.cls.includes('-mobile'), mobile);
   assert.equal(icon.attr['aria-hidden'], 'true');
@@ -234,10 +235,12 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
 
   plugin.update({ binding: globalThis.crypto.randomUUID(), enabled: true, interval: 0 });
   let resolve;
+  let controls;
   let calls = 0;
-  plugin.engine = () => ({
+  plugin.engine = (_files, options) => ({
     run: state => {
       calls++;
+      controls = options;
       return new Promise(done => { resolve = outcome => done({ ...outcome, state }); });
     },
   });
@@ -248,11 +251,20 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   assert.equal(badge.hidden, false);
   assert.equal(icon.icon, 'refresh-cw');
   assert.equal(text.textContent, mobile ? 'Syncing…' : 'Синхронизация…');
+  assert.equal(stop.hidden, false);
+  assert.equal(stop.text, mobile ? 'Stop' : 'Остановить');
+  controls.progress(0, 2);
+  assert.equal(text.textContent, mobile ? 'Syncing… 0 of 2 files' : 'Синхронизация… 0 из 2 файлов');
+  controls.progress(1, 2);
+  assert.equal(text.textContent, mobile ? 'Syncing… 1 of 2 files' : 'Синхронизация… 1 из 2 файлов');
+  controls.progress(2, 2);
+  assert.equal(text.textContent, mobile ? 'Finalizing… 2 of 2 files' : 'Завершение… 2 из 2 файлов');
   await plugin.sync(true);
   assert.equal(calls, 1);
   resolve(success);
   await inProgress;
   assert.equal(badge.dataset.state, 'success');
+  assert.equal(stop.hidden, true);
   assert.equal(icon.icon, 'check');
   assert.equal(text.textContent, mobile ? 'Sync complete' : 'Синхронизация завершена');
   assert.ok(syncAgeText().includes(justNow));
@@ -264,6 +276,8 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   assert.ok(syncAgeText().includes(minuteAgo));
 
   const idle = plugin.sync(false);
+  controls.progress(0, 0);
+  assert.equal(text.textContent, mobile ? 'Syncing…' : 'Синхронизация…');
   resolve({ ...success, counts: { ...count, push: 0 } });
   await idle;
   assert.equal(badge.hidden, true);
@@ -271,7 +285,23 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   const lastSuccessfulTime = savedData.lastSuccess;
   now += 60_000;
 
+  plugin.debounce();
+  const stopped = plugin.sync(true);
+  stop.click();
+  assert.equal(controls.signal.aborted, true);
+  assert.equal(plugin.queued, false);
+  assert.equal(stop.disabled, true);
+  controls.progress(2, 2);
+  assert.equal(text.textContent, mobile ? 'Stopping…' : 'Остановка…');
+  resolve({ ...success, errors: ['cancelled'] });
+  await stopped;
+  assert.equal(badge.dataset.state, 'cancelled');
+  assert.equal(stop.hidden, true);
+  assert.equal(text.textContent, mobile ? 'Sync stopped' : 'Синхронизация остановлена');
+  assert.equal(savedData.lastSuccess, lastSuccessfulTime);
+
   const partial = plugin.sync(true);
+  assert.equal(stop.disabled, false);
   resolve({ ...success, counts: { ...count, blocked: 1 }, errors: ['cloud-lock'] });
   await partial;
   assert.equal(badge.dataset.state, 'error');

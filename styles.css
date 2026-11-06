@@ -1,5 +1,6 @@
 .total-sync-ribbon[hidden],
 .total-sync-last-sync[hidden],
+.total-sync-feedback-stop[hidden],
 .total-sync-feedback-badge[hidden] {
   display: none;
 }
@@ -35,6 +36,21 @@
 .total-sync-feedback-label {
   min-inline-size: 0;
   overflow-wrap: anywhere;
+}
+
+.total-sync-feedback-stop {
+  box-sizing: border-box;
+  flex: none;
+  block-size: auto;
+  min-block-size: var(--input-height, 32px);
+  max-inline-size: 50%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+}
+
+.total-sync-feedback-mobile .total-sync-feedback-stop {
+  min-block-size: 44px;
 }
 
 .total-sync-feedback-icon {
