@@ -41,6 +41,7 @@ class Setting {
   controls = [];
   constructor(container) { container.children.push(this); }
   setName(name) { this.name = name; return this; }
+  setClass(cls) { this.cls = cls; return this; }
   setHeading() { return this; }
   setDesc(value) { this.description = value; return this; }
   add(init) {
@@ -87,6 +88,7 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
     App: class {},
     Modal: class {
       contentEl = new Element();
+      modalEl = new Element();
       setTitle(title) { this.title = title; }
       open() { modals.push(this); }
       close() { this.closed = true; }
@@ -163,11 +165,13 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   plugin.resolveConflict = async (value, content) => { assert.equal(value, review); resolution = content; return true; };
   plugin.commands.find(command => command.id === 'resolve-conflicts').callback();
   const [list] = modals;
+  assert.equal(list.modalEl.cls, 'total-sync-conflict-dialog');
   assert.equal(list.contentEl.children[0].name, review.path);
   await list.contentEl.children[0].controls[0].click();
   const [, editor] = modals;
   assert.equal(list.closed, true);
   const rows = editor.contentEl.children.filter(child => child instanceof Setting);
+  assert.ok(rows.every(row => row.cls === 'total-sync-conflict-actions'));
   const save = rows[2].controls[0];
   assert.equal(save.disabled, true);
   rows[0].controls[2].click();
@@ -183,8 +187,9 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   plugin.commands.find(command => command.id === 'resolve-conflicts').callback();
   await modals[2].contentEl.children[0].controls[0].click();
   const largeEditor = modals[3];
+  assert.equal(largeEditor.modalEl.cls, 'total-sync-conflict-dialog');
   assert.equal(largeEditor.contentEl.children.some(child => child.tag === 'textarea'), false);
-  const largeControls = largeEditor.contentEl.children.find(child => child instanceof Setting).controls;
+  const largeControls = largeEditor.contentEl.children.find(child => child.cls === 'total-sync-conflict-actions').controls;
   assert.equal(largeControls.length, 2);
   await largeControls[1].click();
   assert.deepEqual({ ...resolution }, { kind: 'remote' });

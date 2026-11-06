@@ -61,6 +61,7 @@ function showVersionPreviews(container: HTMLElement, local: string, remote: stri
 
 export function showMarkdownConflicts(plugin: TotalSync): void {
   const modal = new Modal(plugin.app);
+  modal.modalEl.addClass('total-sync-conflict-dialog');
   modal.setTitle(t('TotalSync conflicts', 'Конфликты TotalSync'));
   const paths = plugin.pendingConflicts();
   if (!paths.length) modal.contentEl.createEl('p', { text: t('No conflicts on this device.', 'На этом устройстве нет конфликтов.') });
@@ -71,6 +72,7 @@ export function showMarkdownConflicts(plugin: TotalSync): void {
         if (!review) return;
         modal.close();
         const editor = new Modal(plugin.app);
+        editor.modalEl.addClass('total-sync-conflict-dialog');
         editor.setTitle(path);
         if (review.kind === 'whole') {
           editor.contentEl.createEl('p', { text: t(
@@ -82,7 +84,7 @@ export function showMarkdownConflicts(plugin: TotalSync): void {
           const save = async (kind: 'local' | 'remote') => {
             if (await plugin.resolveConflict(review, { kind })) editor.close();
           };
-          new Setting(editor.contentEl)
+          new Setting(editor.contentEl).setClass('total-sync-conflict-actions')
             .addButton(btn => btn.setButtonText(t('Save device version', 'Сохранить версию с этого устройства')).onClick(() => save('local')))
             .addButton(btn => btn.setButtonText(t('Save cloud version', 'Сохранить версию из облака')).onClick(() => save('remote')));
           editor.open();
@@ -113,12 +115,12 @@ export function showMarkdownConflicts(plugin: TotalSync): void {
             choices.set(part, area.value === '' ? [] : area.value.split('\n'));
             refreshSave();
           });
-          new Setting(editor.contentEl)
+          new Setting(editor.contentEl).setClass('total-sync-conflict-actions')
             .addButton(control => control.setButtonText(t('Use this device', 'С этого устройства')).onClick(() => choose(part.local)))
             .addButton(control => control.setButtonText(t('Use cloud', 'Из облака')).onClick(() => choose(part.remote)))
             .addButton(control => control.setButtonText(t('Keep both', 'Обе версии')).onClick(() => choose([...part.remote, ...part.local])));
         }
-        new Setting(editor.contentEl).addButton(control => {
+        new Setting(editor.contentEl).setClass('total-sync-conflict-actions').addButton(control => {
           refreshSave = () => { control.setDisabled(choices.size !== disputed.length); };
           control.setCta().setButtonText(t('Save merged note', 'Сохранить объединённую заметку')).onClick(async () => {
             if (choices.size !== disputed.length) return;
