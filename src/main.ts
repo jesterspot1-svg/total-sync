@@ -12,7 +12,7 @@ import { SyncFeedback } from './sync-feedback';
 import { SettingsTab, showHistory, showPlan, showInventory, showMarkdownConflicts, notifyMarkdownConflicts } from './ui';
 import { collectionResponse, MAIL, mailEndpoint, WebDav, type Transport } from './webdav';
 import { PluginFiles, type PluginRuntime } from './plugin-disk';
-import { newSigningKey } from './plugin-profile';
+import { loadSigningKey } from './plugin-profile';
 import { PluginSync } from './plugin-sync';
 import { PluginCatalog, PluginTransfer } from './plugin-transfer';
 import { showPluginProfiles } from './plugin-ui';
@@ -350,7 +350,8 @@ export default class TotalSync extends Plugin {
     if (this.profile !== 'windows' || !this.config.binding || this.stateError) throw new SyncError('inactive');
     const credential = this.credentials();
     if (!credential) throw new SyncError('configuration');
-    const scope = this.config.binding + '-' + this.config.device;
+    const binding = this.config.binding, device = this.config.device;
+    const scope = binding + '-' + device;
     if (this.pluginService && this.pluginServiceKey === scope) return this.pluginService;
     type Manager = {
       plugins: Record<string, { onExternalSettingsChange?: () => unknown }>; disablePlugin(id: string): Promise<void>;
@@ -404,12 +405,7 @@ export default class TotalSync extends Plugin {
     catalog, this.config.binding, this.config.device, {
       read: () => this.app.loadLocalStorage('total-sync-plugin-state-' + scope) as unknown,
       write: value => this.app.saveLocalStorage('total-sync-plugin-state-' + scope, value),
-      signingKey: async () => {
-        const key = 'total-sync-plugin-signing-' + scope;
-        let value = this.app.secretStorage.getSecret(key);
-        if (!value) { value = await newSigningKey(); this.app.secretStorage.setSecret(key, value); }
-        return value;
-      },
+      signingKey: () => loadSigningKey(this.app.secretStorage, binding, device),
     }, check, (completed, total) => this.feedback?.progress(completed, total));
     this.pluginServiceKey = scope;
     return this.pluginService;

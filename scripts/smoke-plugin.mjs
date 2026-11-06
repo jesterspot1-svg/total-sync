@@ -248,7 +248,16 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   assert.equal(ribbon.children.length, 1);
   if (!mobile) {
     const secrets = new Map([['total-sync-mail-webdav', JSON.stringify({ login: 'fixture@example.com', password: 'synthetic' })]]);
-    mockApp.secretStorage = { getSecret: key => secrets.get(key), setSecret: (key, value) => secrets.set(key, value) };
+    let secretUnavailable = false;
+    mockApp.secretStorage = {
+      getSecret: key => secrets.get(key),
+      setSecret: (key, value) => {
+        assert.match(key, /^[a-z0-9-]+$/);
+        assert.ok(key.length <= 64, 'Obsidian SecretStorage IDs are limited to 64 characters');
+        if (secretUnavailable) throw new Error('Synthetic unavailable secret storage');
+        secrets.set(key, value);
+      },
+    };
     mockApp.vault.configDir = '.obsidian';
     let scheduled = false, persisted = 0;
     mockApp.plugins = {
@@ -270,7 +279,13 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
       for (let i = 0; i < 1000; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
       assert.fail('Plugin profile panel did not settle');
     };
+    secretUnavailable = true;
     plugin.commands.find(command => command.id === 'plugin-profiles').checkCallback(false);
+    await settled(() => modals.at(-1).contentEl.children.some(child => child.cls === 'total-sync-plugin-error'));
+    assert.equal(plugin.currentError, 'plugin-secret');
+    assert.ok(modals.at(-1).contentEl.children.some(child => child.text?.includes('хранилище секретов')));
+    secretUnavailable = false;
+    modals.at(-1).contentEl.children.flatMap(row => row.controls ?? []).find(c => c.label === 'Обновить источники').click();
     await settled(() => modals.at(-1).contentEl.children.some(child => child.cls === 'total-sync-plugin-fingerprint'));
     const setup = modals.at(-1);
     assert.ok(setup.contentEl.children.some(row => row.controls?.some(c => c.label === 'Этот ноутбук — исходный')));

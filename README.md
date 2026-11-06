@@ -4,7 +4,7 @@
 
 TotalSync is a free Obsidian plugin that syncs vault data through [Mail Cloud WebDAV](https://help.mail.ru/cloud/desktop/webdav/). It uses a dedicated remote vault ID and independent channels for notes and attachments, selected Windows settings, and optional Bookmarks snapshots.
 
-**0.1.16 is a test prerelease.** It requires Obsidian 1.11.5 or later. Test the new Windows plugin profile with synthetic data using the [plugin guide](docs/COMMUNITY_PLUGINS_RU.md). The existing [beta guide](docs/BETA_TEST_INSTRUCTION_RU.md) covers note synchronization.
+**0.1.17 is a test prerelease.** It fixes plugin profile setup failing because the signing-key identifier exceeded Obsidian's SecretStorage limit. Update through BRAT on both Windows laptops. It requires Obsidian 1.11.5 or later. Test the Windows plugin profile with synthetic data using the [plugin guide](docs/COMMUNITY_PLUGINS_RU.md). The existing [beta guide](docs/BETA_TEST_INSTRUCTION_RU.md) covers note synchronization.
 
 ## Data and privacy
 

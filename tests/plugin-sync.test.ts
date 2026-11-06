@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { decode, encode, parse, SyncError } from '../src/model';
 import { PluginFiles, type PluginDisk, type PluginRuntime } from '../src/plugin-disk';
-import { candidates, encodeHead, newSigningKey, signHead, verifyHead, type PluginHead } from '../src/plugin-profile';
+import { candidates, encodeHead, loadSigningKey, newSigningKey, signHead, verifyHead, type PluginHead } from '../src/plugin-profile';
 import { preferences, safePreferenceKey } from '../src/plugin-preferences';
 import { PluginSync, type PluginSyncState } from '../src/plugin-sync';
 import { PluginCatalog, PluginTransfer } from '../src/plugin-transfer';
@@ -142,6 +142,59 @@ test('portable fields cover working Excalidraw versions and preserve secret, pat
   assert.deepEqual(preferences('vk-inbox', { targetNotePath: 'Inbox.md', vkToken: 'synthetic', lastProcessedMessageId: 7 }), { targetNotePath: 'Inbox.md' });
   assert.equal(safePreferenceKey('enable_system_commands'), false);
   assert.deepEqual(preferences('custom-plugin', { color: 'blue', payload: { accessToken: 'synthetic' } }, ['color', 'payload']), { color: 'blue' });
+});
+
+test('profile signing keys respect native secret ID limits, retain identity and isolate vault/device scopes', async () => {
+  const secrets = new Map<string, string>();
+  const storage = {
+    getSecret: (id: string) => secrets.get(id),
+    setSecret: (id: string, value: string) => {
+      assert.match(id, /^[a-z0-9-]+$/);
+      assert.ok(id.length <= 64);
+      secrets.set(id, value);
+    },
+  };
+  const key = await loadSigningKey(storage, vault, a);
+  const signed = await signHead({ schema: 1, vault, device: a, seq: 1, edits: {} }, key);
+  assert.equal((await verifyHead(encodeHead(signed), vault, a)).fingerprint.length, 64);
+  assert.equal(await loadSigningKey(storage, vault, a), key);
+  assert.notEqual(await loadSigningKey(storage, vault, b), key);
+  assert.notEqual(await loadSigningKey(storage, c, a), key);
+  assert.equal(secrets.size, 3);
+});
+
+test('an existing legacy signing key is migrated without changing its fingerprint or other secrets', async () => {
+  const key = await newSigningKey();
+  const legacyId = 'total-sync-plugin-signing-' + vault + '-' + a;
+  const secrets = new Map([[legacyId, key], ['total-sync-mail-webdav', 'synthetic-credential']]);
+  const storage = {
+    getSecret: (id: string) => secrets.get(id),
+    setSecret: (id: string, value: string) => { assert.ok(id.length <= 64); secrets.set(id, value); },
+  };
+  assert.equal(await loadSigningKey(storage, vault, a), key);
+  assert.equal(await loadSigningKey(storage, vault, a), key);
+  assert.equal(secrets.get(legacyId), key);
+  assert.equal(secrets.get('total-sync-mail-webdav'), 'synthetic-credential');
+  assert.equal(secrets.size, 3);
+});
+
+test('secret storage failures use a specific safe error and a later retry prepares the profile key', async () => {
+  const secrets = new Map<string, string>();
+  let unavailable = true;
+  const storage = {
+    getSecret: (id: string) => secrets.get(id),
+    setSecret: (id: string, value: string) => {
+      if (unavailable) throw new Error('synthetic private storage details');
+      secrets.set(id, value);
+    },
+  };
+  const expected = (e: unknown) => e instanceof SyncError && e.code === 'plugin-secret' && !e.message.includes('private');
+  await assert.rejects(loadSigningKey(storage, vault, a), expected);
+  assert.equal(secrets.size, 0);
+  unavailable = false;
+  assert.ok(await loadSigningKey(storage, vault, a));
+  await assert.rejects(loadSigningKey({ getSecret: () => null, setSecret: () => {} }, vault, b), expected);
+  await assert.rejects(loadSigningKey({ getSecret: () => { throw new Error('synthetic'); }, setSecret: () => {} }, vault, b), expected);
 });
 
 test('signed profiles bind vault, source and payload and reject tampering and embedded private keys', async () => {

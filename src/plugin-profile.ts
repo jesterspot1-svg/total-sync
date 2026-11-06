@@ -91,6 +91,26 @@ export async function newSigningKey(): Promise<string> {
   const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
   return JSON.stringify(await crypto.subtle.exportKey('jwk', pair.privateKey));
 }
+export interface SigningKeyStorage {
+  getSecret(id: string): string | null | undefined;
+  setSecret(id: string, value: string): void;
+}
+export async function loadSigningKey(storage: SigningKeyStorage, vault: string, device: string): Promise<string> {
+  if (!idPattern.test(vault) || !idPattern.test(device)) throw new SyncError('identity');
+  try {
+    const scope = vault + '-' + device;
+    // SecretStorage permits at most 64 lowercase characters. Keep both IDs in the hash input.
+    const id = 'total-sync-plugin-key-' + (await sha256(encode(scope))).slice(0, 40);
+    const current = storage.getSecret(id);
+    if (current) return current;
+    // Reuse any key accepted by an earlier host; never silently replace an established identity.
+    const legacy = storage.getSecret('total-sync-plugin-signing-' + scope);
+    const key = legacy || await newSigningKey();
+    storage.setSecret(id, key);
+    if (storage.getSecret(id) !== key) throw new SyncError('plugin-secret');
+    return key;
+  } catch { throw new SyncError('plugin-secret'); }
+}
 export async function signHead(data: PluginHead, privateKey: string): Promise<SignedHead> {
   const jwk: JsonWebKey = JSON.parse(privateKey);
   const key = await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
