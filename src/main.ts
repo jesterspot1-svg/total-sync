@@ -14,6 +14,7 @@ import { collectionResponse, MAIL, mailEndpoint, WebDav, type Transport } from '
 
 const storageKey = 'total-sync-options-v1';
 const secretKey = 'total-sync-mail-webdav';
+const syncIcon = 'refresh-cw';
 type Credential = { login: string; password: string };
 type Logged = { at: number; event: string; status?: number; phase?: SyncError['phase'] };
 type Timer = number;
@@ -70,7 +71,7 @@ export default class TotalSync extends Plugin {
       this.currentError = 'integrity';
     }
     this.addSettingTab(new SettingsTab(this.app, this));
-    this.addCommand({ id: 'sync-now', name: t('Sync now', 'Синхронизировать сейчас'), callback: () => { void this.sync(true); } });
+    this.addCommand({ id: 'sync-now', name: t('Sync now', 'Синхронизировать сейчас'), icon: syncIcon, callback: () => { void this.sync(true); } });
     this.addCommand({ id: 'show-plan', name: t('Show sync plan', 'Показать план операций'), callback: () => { void showPlan(this); } });
     this.addCommand({ id: 'history', name: t('Show recovery history', 'Показать историю восстановления'), callback: () => { void showHistory(this); } });
     this.addCommand({ id: 'resolve-conflicts', name: t('Resolve conflicts', 'Разобрать конфликты'), callback: () => showMarkdownConflicts(this) });
@@ -234,13 +235,15 @@ export default class TotalSync extends Plugin {
   }
 
   private updateRibbon(): void {
-    if (Platform.isMobile || !this.feedback) return;
-    if (this.config.ribbonButton && !this.ribbon) {
-      this.ribbon = this.addRibbonIcon('refresh-cw', t('TotalSync: Sync now', 'TotalSync: Синхронизировать сейчас'),
+    if (!this.feedback) return;
+    // On phones Obsidian manages this action in its ribbon menu and quick access settings.
+    const show = Platform.isMobile || this.config.ribbonButton;
+    if (show && !this.ribbon) {
+      this.ribbon = this.addRibbonIcon(syncIcon, t('TotalSync: Sync now', 'TotalSync: Синхронизировать сейчас'),
         () => { void this.sync(true); });
       this.ribbon.addClass('total-sync-ribbon');
     }
-    if (this.ribbon) this.ribbon.hidden = !this.config.ribbonButton;
+    if (this.ribbon) this.ribbon.hidden = !show;
   }
 
   setStatusListener(listener?: (lastSync: string, exactTime: string | null) => void): void {

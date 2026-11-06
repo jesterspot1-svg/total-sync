@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.15 · Test prerelease
+
+- Add a TotalSync action to Obsidian's mobile ribbon menu. Use the mobile quick-access setting to run sync with a short press of the bottom-right button.
+- Use the sync icon when the command is added to the mobile editing toolbar.
+
 ## 0.1.14 · Test prerelease
 
 - Remove the TotalSync file-size cap for uploads and downloads on iOS. Update the attachments setting to describe the iOS policy.

@@ -156,7 +156,8 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   assert.equal(password.controls[0].inputEl.type, 'password');
   assert.equal(plugin.config.enabled, false);
   assert.equal(plugin.config.binding, '');
-  assert.ok(plugin.commands.some(command => command.id === 'sync-now'));
+  const syncCommand = plugin.commands.find(command => command.id === 'sync-now');
+  assert.equal(syncCommand.icon, 'refresh-cw');
   const settingsActions = all.filter(row => row.cls === 'total-sync-button-row');
   assert.deepEqual(settingsActions.map(row => row.controls.length), [1, 3, 3, 2]);
   assert.ok(settingsActions.every(row => row.infoEl.hidden === !row.name));
@@ -215,28 +216,31 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   assert.equal(badge.hidden, true);
   const ribbonSetting = all.find(row => row.name === 'Кнопка синхронизации в левой панели');
   assert.equal(!!ribbonSetting, !mobile);
-  assert.equal(ribbon.children.length, 0);
-  if (!mobile) {
+  assert.equal(labels.includes('Mobile quick access'), mobile);
+  assert.equal(ribbon.children.length, mobile ? 1 : 0);
+  if (ribbonSetting) {
     const toggle = ribbonSetting.controls[0];
     assert.equal(toggle.value, false);
     toggle.change(true);
-    const button = ribbon.children[0];
-    assert.equal(button.hidden, false);
-    assert.match(button.title, /TotalSync/);
-    const actualSync = plugin.sync;
-    let manual;
-    plugin.sync = value => { manual = value; };
-    button.activate();
-    assert.equal(manual, true);
-    plugin.sync = actualSync;
     toggle.change(false);
-    assert.equal(button.hidden, true);
+    assert.equal(ribbon.children[0].hidden, true);
     toggle.change(true);
-    assert.equal(button.hidden, false);
-    assert.equal(ribbon.children.length, 1);
   }
+  assert.equal(ribbon.children.length, 1);
+  const button = ribbon.children[0];
+  assert.equal(button.hidden, false);
+  assert.equal(button.icon, syncCommand.icon);
+  assert.match(button.title, /TotalSync/);
+  const actualSync = plugin.sync;
+  const manualStarts = [];
+  plugin.sync = value => { manualStarts.push(value); };
+  button.activate();
+  syncCommand.callback();
+  assert.deepEqual(manualStarts, [true, true]);
+  plugin.sync = actualSync;
 
   plugin.update({ binding: globalThis.crypto.randomUUID(), enabled: true, interval: 0 });
+  assert.equal(ribbon.children.length, 1);
   let resolve;
   let controls;
   let calls = 0;
@@ -326,6 +330,7 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
 
   const restarted = new module.exports.default();
   await restarted.onload();
+  assert.equal(ribbon.children.length, 1);
   restarted.tab.display();
   const restoredStatus = restarted.tab.containerEl.children.find(row => row.name === (mobile ? 'Status' : 'Состояние'));
   assert.ok(restoredStatus.description.includes(minuteAgo));

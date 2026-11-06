@@ -398,7 +398,12 @@ export class SettingsTab extends PluginSettingTab {
     new Setting(el).setName(t('Sync', 'Синхронизация')).setHeading();
     this.toggle('enabled', 'Enable sync', 'Включить синхронизацию',
       ['Review the plan before enabling. Use a separate synthetic test vault.', 'Перед включением проверьте план. Используйте отдельное хранилище с искусственными данными.']);
-    if (plugin.profile !== 'mobile') {
+    if (plugin.profile === 'mobile') {
+      new Setting(el).setName(t('Mobile quick access', 'Быстрый запуск на телефоне')).setDesc(t(
+        'Open the bottom-right menu to find the TotalSync icon. You can pin it under Ribbon menu in Obsidian settings.',
+        'Иконка TotalSync находится в меню справа внизу. Чтобы запускать синхронизацию одним касанием, назначьте её в настройках меню ленты Obsidian.',
+      ));
+    } else {
       this.toggle('ribbonButton', 'Sync button in the ribbon', 'Кнопка синхронизации в левой панели',
         ['Adds a shortcut to run sync now.', 'Добавляет кнопку для ручного запуска.']);
     }
