@@ -10,7 +10,7 @@ class Element {
   style = {};
   dataset = {};
   hidden = false;
-  addEventListener() {}
+  addEventListener(name, callback) { this[name] = callback; }
   appendText() {}
   empty() { this.children = []; }
   addClass(cls) { this.cls = [this.cls, cls].filter(Boolean).join(' '); }
@@ -29,11 +29,12 @@ class Element {
 class Control {
   inputEl = new Element();
   setValue(value) { this.value = value; return this; }
-  setDisabled() { return this; }
+  setDisabled(value) { this.disabled = value; return this; }
   setPlaceholder() { return this; }
   setButtonText(value) { this.label = value; return this; }
   onChange(callback) { this.change = callback; return this; }
-  onClick() { return this; }
+  onClick(callback) { this.click = callback; return this; }
+  setCta() { return this; }
 }
 
 class Setting {
@@ -60,6 +61,7 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   const body = new Element();
   const ribbon = new Element();
   const statusBar = new Element();
+  const modals = [];
   const timers = new Map();
   let now = 1_800_000_000_000;
   let savedData = null;
@@ -83,7 +85,12 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   };
   const api = {
     App: class {},
-    Modal: class {},
+    Modal: class {
+      contentEl = new Element();
+      setTitle(title) { this.title = title; }
+      open() { modals.push(this); }
+      close() { this.closed = true; }
+    },
     Notice: class {},
     Plugin: class {
       app = mockApp;
@@ -115,6 +122,8 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
     Date: class extends Date { static now() { return now; } },
     localStorage: { getItem: key => claims.get(key), setItem: (key, value) => claims.set(key, value) },
     crypto: globalThis.crypto,
+    TextDecoder,
+    TextEncoder,
   }, { filename: 'dist/main.js' });
   const plugin = new module.exports.default();
   await plugin.onload();
@@ -141,6 +150,36 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   assert.equal(plugin.config.enabled, false);
   assert.equal(plugin.config.binding, '');
   assert.ok(plugin.commands.some(command => command.id === 'sync-now'));
+  const review = { path: 'Note.md', merge: { eol: '\n', parts: [
+    { kind: 'text', lines: ['Before'] },
+    { kind: 'conflict', local: ['Phone'], remote: ['Laptop'] },
+    { kind: 'conflict', local: ['This'], remote: ['Cloud'] },
+    { kind: 'text', lines: ['After', ''] },
+  ] } };
+  const pendingConflicts = plugin.pendingConflicts;
+  plugin.pendingConflicts = () => [review.path];
+  plugin.reviewConflict = async path => { assert.equal(path, review.path); return review; };
+  let resolution;
+  plugin.resolveConflict = async (value, content) => { assert.equal(value, review); resolution = content; return true; };
+  plugin.commands.find(command => command.id === 'resolve-conflicts').callback();
+  const [list] = modals;
+  assert.equal(list.contentEl.children[0].name, review.path);
+  await list.contentEl.children[0].controls[0].click();
+  const [, editor] = modals;
+  assert.equal(list.closed, true);
+  const rows = editor.contentEl.children.filter(child => child instanceof Setting);
+  const save = rows[2].controls[0];
+  assert.equal(save.disabled, true);
+  rows[0].controls[2].click();
+  assert.equal(save.disabled, true);
+  const secondArea = editor.contentEl.children.filter(child => child.tag === 'textarea')[1];
+  secondArea.value = 'Edited';
+  secondArea.input();
+  assert.equal(save.disabled, false);
+  await save.click();
+  assert.equal(resolution, 'Before\nLaptop\nPhone\nEdited\nAfter\n');
+  assert.equal(editor.closed, true);
+  plugin.pendingConflicts = pendingConflicts;
   const indicator = body.children.find(node => node.cls?.includes('total-sync-feedback'));
   const badge = indicator.children[0];
   const [icon, text] = badge.children;
@@ -180,8 +219,8 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
       return new Promise(done => { resolve = outcome => done({ ...outcome, state }); });
     },
   });
-  const count = { push: 1, pull: 0, 'delete-local': 0, 'delete-remote': 0, conflict: 0, equal: 0, blocked: 0 };
-  const success = { counts: count, errors: [], devices: {}, desktopChanged: false };
+  const count = { push: 1, pull: 0, 'delete-local': 0, 'delete-remote': 0, conflict: 0, review: 0, equal: 0, blocked: 0 };
+  const success = { counts: count, errors: [], devices: {}, desktopChanged: false, merged: 0, newConflicts: 0 };
   const inProgress = plugin.sync(true);
   assert.equal(badge.dataset.state, 'running');
   assert.equal(badge.hidden, false);
@@ -239,4 +278,4 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   restarted.onunload();
   assert.equal(timers.size, 0);
 }
-console.log('Built plugin verified with synthetic Obsidian API, including ribbon, feedback, persisted sync age and cleanup.');
+console.log('Built plugin verified with synthetic Obsidian API, including Markdown review, ribbon, feedback, persisted sync age and cleanup.');

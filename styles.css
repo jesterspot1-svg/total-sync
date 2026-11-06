@@ -70,3 +70,24 @@
     animation: none;
   }
 }
+
+.total-sync-conflict-versions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
+  gap: 12px;
+}
+
+.total-sync-conflict-versions pre {
+  max-block-size: 12rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  padding: 8px;
+  background: var(--background-secondary);
+}
+
+.total-sync-conflict-editor {
+  box-sizing: border-box;
+  inline-size: 100%;
+  font-family: var(--font-monospace);
+}

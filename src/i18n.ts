@@ -28,6 +28,7 @@ export function errorText(code: SyncError['code']): string {
     path: ['A file name, case collision or path is incompatible.', 'Недопустимый путь, имя файла или совпадение без учёта регистра.'],
     changed: ['The file changed during sync or the target already exists.', 'Файл изменился во время синхронизации или целевой файл уже существует.'],
     'mass-delete': ['Sync stopped. Open the sync plan to review and confirm the deletions.', 'Синхронизация остановлена. Откройте план и проверьте удаления перед подтверждением.'],
+    'merge-conflict': ['Some note edits need review. Open Resolve conflicts in TotalSync.', 'Некоторые правки ждут выбора. Откройте «Разобрать конфликты» в TotalSync.'],
     size: ['A file exceeded the current device limit.', 'Файл превышает лимит для этого устройства.'],
     configuration: ['Check the settings. Some configuration files or credentials may be missing or unsupported.', 'Проверьте настройки. Конфигурация или учётные данные могут отсутствовать либо не поддерживаться.'],
     local: ['The local operation failed. Check free space and vault access.', 'Локальная операция не удалась. Проверьте свободное место и доступ к хранилищу.'],

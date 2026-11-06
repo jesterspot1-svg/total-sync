@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
 import { DOMParser } from '@xmldom/xmldom';
 import { SyncEngine } from '../src/engine';
-import { encode, newState, sha256, stamp, SyncError, type Channel, type LocalEntry, type LocalFiles, type Profile, type Scan, type Stamp } from '../src/model';
+import { encode, newState, sha256, stamp, SyncError, type Channel, type LocalEntry, type LocalFiles, type Profile, type Scan, type Stamp, type SyncState } from '../src/model';
 import { RemoteVault } from '../src/repository';
 import { collectionResponse, MAIL, WebDav, type Request } from '../src/webdav';
 
@@ -207,7 +207,7 @@ export class MemoryVault implements LocalFiles {
 
 export class Client {
   readonly local = new MemoryVault();
-  state = newState();
+  state: SyncState = newState();
   engine: SyncEngine;
   readonly device = crypto.randomUUID();
 

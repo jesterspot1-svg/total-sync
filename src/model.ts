@@ -11,7 +11,7 @@ export type ErrorCode =
   | 'auth' | 'forbidden' | 'missing' | 'rate' | 'server' | 'network' | 'timeout' | 'uncertain'
   | 'dav' | 'protocol' | 'busy' | 'cloud-lock' | 'cloud-unlock' | 'cloud-advanced' | 'cloud-preparing' | 'upload-retry'
   | 'integrity' | 'identity' | 'path' | 'changed'
-  | 'mass-delete' | 'size' | 'configuration' | 'local' | 'inactive';
+  | 'mass-delete' | 'merge-conflict' | 'size' | 'configuration' | 'local' | 'inactive';
 
 export class SyncError extends Error {
   constructor(readonly code: ErrorCode, readonly status?: number) {
@@ -62,10 +62,16 @@ export interface Baseline {
   local: Stamp;
   remote: Stamp;
 }
+export interface PendingConflict {
+  local: string;
+  remote: string;
+  base: string | null;
+}
 export interface SyncState {
   schema: 1;
   checkpoint: Checkpoint | null;
   base: Record<Channel, Record<string, Baseline>>;
+  pending?: Record<string, PendingConflict>;
 }
 export interface Scan {
   entries: Map<string, LocalEntry>;
@@ -80,8 +86,8 @@ export interface LocalFiles {
   apply(channel: Channel, path: string, expected: Stamp, next: LocalEntry | null, bytes?: ArrayBuffer): Promise<void>;
 }
 
-export function newState(): SyncState {
-  return { schema: 1, checkpoint: null, base: { content: index(), 'shared-state': index(), 'desktop-config': index() } };
+export function newState(): SyncState & { pending: Record<string, PendingConflict> } {
+  return { schema: 1, checkpoint: null, base: { content: index(), 'shared-state': index(), 'desktop-config': index() }, pending: index() };
 }
 
 export function stamp(entry?: LocalEntry | RemoteEntry | null): Stamp {

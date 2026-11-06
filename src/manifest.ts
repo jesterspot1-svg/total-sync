@@ -98,6 +98,10 @@ export function validState(value: unknown): value is SyncState {
   if (!object(value) || value.schema !== 1 || !object(value.base)) return false;
   const checkpoint = value.checkpoint;
   if (checkpoint !== null && (!object(checkpoint) || !integer(checkpoint.revision) || !validHash(checkpoint.hash))) return false;
+  const pending = value.pending;
+  if (pending !== undefined && (!object(pending) || !Object.entries(pending).every(([path, item]) =>
+    /\.md$/i.test(path) && inChannel('content', path) && object(item) && validHash(item.local)
+    && validHash(item.remote) && (item.base === null || validHash(item.base))))) return false;
   const base = value.base;
   return channels.every(channel => {
     const group = base[channel];

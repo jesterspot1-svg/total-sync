@@ -68,7 +68,7 @@ test('offline changes remain local until connection recovers', async t => {
   assert.equal(b.local.text('Offline.md'), 'offline edit');
 });
 
-test('concurrent Markdown edits survive on both devices and replay without duplicates', async t => {
+test('overlapping Markdown edits survive in history and resolve in the original file after restart', async t => {
   const { a, b } = await setup(t);
   a.local.put('Конфликт.md', 'common');
   await a.run();
@@ -80,11 +80,24 @@ test('concurrent Markdown edits survive on both devices and replay without dupli
     count + (outcome.status === 'fulfilled' ? outcome.value.counts.push : 0), 0), 1);
   for (const outcome of outcomes) if (outcome.status === 'rejected') assert.ok(fails('cloud-advanced')(outcome.reason));
   for (const client of [a, b, a, b]) await client.run();
+  assert.equal(a.local.text('Конфликт.md'), 'laptop edit');
+  assert.equal(b.local.text('Конфликт.md'), 'PC edit');
+  const owner = a.state.pending?.['Конфликт.md'] ? a : b;
+  assert.equal((await owner.run()).counts.review, 1);
+  owner.state = JSON.parse(JSON.stringify(owner.state));
+  const review = await owner.engine.reviewConflict(owner.state, 'Конфликт.md');
+  assert.equal(review.merge.parts.filter(part => part.kind === 'conflict').length, 1);
+  const archived = new Set<string>();
+  for (const item of (await owner.engine.history(owner.state)).filter(row => row.reason === 'conflict')) {
+    await owner.engine.restore(owner.state, item.id, async (_item, data) => { archived.add(decode(data)); });
+  }
+  assert.deepEqual(archived, new Set(['laptop edit', 'PC edit']));
+  owner.state = await owner.engine.resolveConflict(owner.state, review, 'laptop edit\nPC edit');
   for (const client of [a, b]) {
-    const paths = [...client.local.group('content').keys()];
-    assert.equal(paths.length, 2);
-    assert.equal(paths.filter(path => path.includes('(conflict ')).length, 1);
-    assert.deepEqual(new Set(paths.map(path => client.local.text(path))), new Set(['laptop edit', 'PC edit']));
+    await client.run();
+    assert.deepEqual([...client.local.group('content').keys()], ['Конфликт.md']);
+    assert.equal(client.local.text('Конфликт.md'), 'laptop edit\nPC edit');
+    assert.equal(client.state.pending?.['Конфликт.md'], undefined);
   }
 });
 
@@ -440,24 +453,75 @@ test('exclusive MOVE publishes phone edits while the old empty lock still exists
   assert.equal(server.folders.has('/' + lock), true);
 });
 
-test('concurrent exclusive publishers replan conflicts and preserve both notes', async t => {
+test('concurrent exclusive publishers replan and combine two appended lines in one note', async t => {
   const { server, id } = await setup(t);
   const a = new Client(server, id, 'windows', undefined, true);
   const b = new Client(server, id, 'mobile', undefined, true);
   a.local.put('Race.md', 'before');
   await a.run();
   await b.run();
-  a.local.put('Race.md', 'laptop edit');
-  b.local.put('Race.md', 'phone edit');
+  a.local.put('Race.md', 'before\nlaptop edit');
+  b.local.put('Race.md', 'before\nphone edit');
   const outcomes = await Promise.allSettled([a.run(), b.run()]);
   for (const outcome of outcomes) if (outcome.status === 'rejected') assert.ok(fails('cloud-advanced')(outcome.reason));
   for (const client of [a, b, a, b]) await client.run();
   for (const client of [a, b]) {
-    const paths = [...client.local.group('content').keys()];
-    assert.equal(paths.length, 2);
-    assert.deepEqual(new Set(paths.map(path => client.local.text(path))), new Set(['laptop edit', 'phone edit']));
+    assert.deepEqual([...client.local.group('content').keys()], ['Race.md']);
+    assert.deepEqual(new Set(client.local.text('Race.md')?.split('\n')), new Set(['before', 'laptop edit', 'phone edit']));
   }
   assert.equal(server.folders.has('/' + ROOT + '/vaults/' + id + '/metadata/lock'), false);
+});
+
+test('an automatic merge is replayed without duplicates if local application fails', async t => {
+  const { a, b } = await setup(t);
+  a.local.put('Merge.md', 'Общий текст');
+  await a.run();
+  await b.run();
+  a.local.put('Merge.md', 'Общий текст\nПравка Windows');
+  b.local.put('Merge.md', 'Общий текст\nПравка iPhone');
+  await a.run();
+  b.local.failNextPath = 'Merge.md';
+  assert.equal((await b.run()).counts.blocked, 1);
+  assert.equal(b.local.text('Merge.md'), 'Общий текст\nПравка iPhone');
+  await b.run();
+  await a.run();
+  const expected = 'Общий текст\nПравка Windows\nПравка iPhone';
+  assert.equal(a.local.text('Merge.md'), expected);
+  assert.equal(b.local.text('Merge.md'), expected);
+  assert.deepEqual([...b.local.group('content').keys()], ['Merge.md']);
+});
+
+test('the resolver refuses to overwrite a note that changed after opening the review', async t => {
+  const { a, b } = await setup(t);
+  a.local.put('Stale.md', 'base');
+  await a.run();
+  await b.run();
+  a.local.put('Stale.md', 'cloud');
+  b.local.put('Stale.md', 'local');
+  await a.run();
+  assert.equal((await b.run()).counts.review, 1);
+  const review = await b.engine.reviewConflict(b.state, 'Stale.md');
+  a.local.put('Stale.md', 'newer cloud');
+  await a.run();
+  await assert.rejects(b.engine.resolveConflict(b.state, review, 'old choice'), fails('changed'));
+  assert.equal(b.local.text('Stale.md'), 'local');
+  assert.equal(a.local.text('Stale.md'), 'newer cloud');
+  assert.equal((await b.run()).counts.review, 1);
+});
+
+test('conflicting binary attachments still get a separate byte-exact copy', async t => {
+  const { a, b } = await setup(t);
+  a.local.put('Drawing.pdf', 'base');
+  await a.run();
+  await b.run();
+  a.local.put('Drawing.pdf', 'cloud bytes');
+  b.local.put('Drawing.pdf', 'local bytes');
+  await a.run();
+  assert.equal((await b.run()).counts.conflict, 1);
+  const copy = [...b.local.group('content').keys()].find(path => path.includes('(conflict '));
+  assert.ok(copy);
+  assert.equal(b.local.text(copy), 'local bytes');
+  assert.equal(b.local.text('Drawing.pdf'), 'cloud bytes');
 });
 
 test('interrupted publisher is completed by another client from the verified ready record', async t => {

@@ -2,6 +2,7 @@ import { App, Modal, Notice, PluginSettingTab, Setting } from 'obsidian';
 import { errorText, t } from './i18n';
 import type TotalSync from './main';
 import { idPattern, type Channel, type Profile } from './model';
+import type { MergePart } from './markdown-merge';
 import type { Action } from './planner';
 import { catalogInstallCommand } from './policy';
 import type { Options } from './settings';
@@ -29,10 +30,89 @@ function actionName(action: Action): string {
     'delete-remote': ['Delete in cloud', 'Удалить в облаке'],
     'delete-local': ['Delete locally', 'Удалить локально'],
     conflict: ['Preserve both versions', 'Сохранить обе версии'],
+    review: ['Awaiting conflict review', 'Ожидает разбора конфликта'],
     equal: ['No file changes', 'Без изменения файлов'],
     blocked: ['Skip', 'Пропустить'],
   };
   return t(...labels[action]);
+}
+
+export function notifyMarkdownConflicts(plugin: TotalSync): void {
+  const content = document.createDocumentFragment();
+  content.append(t('TotalSync saved both versions in history.', 'TotalSync сохранил обе версии в истории.'), ' ');
+  const button = document.createElement('button');
+  button.textContent = t('Resolve conflicts', 'Разобрать конфликты');
+  button.addEventListener('click', () => {
+    notice.hide();
+    showMarkdownConflicts(plugin);
+  });
+  content.append(button);
+  const notice = new Notice(content, 9000);
+}
+
+export function showMarkdownConflicts(plugin: TotalSync): void {
+  const modal = new Modal(plugin.app);
+  modal.setTitle(t('TotalSync conflicts', 'Конфликты TotalSync'));
+  const paths = plugin.pendingConflicts();
+  if (!paths.length) modal.contentEl.createEl('p', { text: t('No conflicts on this device.', 'На этом устройстве нет конфликтов.') });
+  for (const path of paths) {
+    new Setting(modal.contentEl).setName(path)
+      .addButton(button => button.setButtonText(t('Review', 'Разобрать')).onClick(async () => {
+        const review = await plugin.reviewConflict(path);
+        if (!review) return;
+        modal.close();
+        const editor = new Modal(plugin.app);
+        editor.setTitle(path);
+        editor.contentEl.createEl('p', { text: t(
+          'Choose or edit each disputed fragment. Compatible edits are already combined.',
+          'Выберите или отредактируйте каждый спорный фрагмент. Совместимые правки уже объединены.',
+        ) });
+        const choices = new Map<MergePart, string[]>();
+        const disputed = review.merge.parts.filter(part => part.kind === 'conflict');
+        let refreshSave = () => {};
+        for (const [i, part] of disputed.entries()) {
+          const title = t('Fragment', 'Фрагмент') + ' ' + (i + 1);
+          editor.contentEl.createEl('h3', { text: title });
+          const versions = editor.contentEl.createDiv({ cls: 'total-sync-conflict-versions' });
+          for (const [label, lines] of [
+            [t('This device', 'Это устройство'), part.local],
+            [t('Cloud', 'Облако'), part.remote],
+          ] as const) {
+            const panel = versions.createDiv();
+            panel.createEl('strong', { text: label });
+            panel.createEl('pre', { text: lines.length ? lines.join('\n') : t('(deleted)', '(удалено)') });
+          }
+          const area = editor.contentEl.createEl('textarea', {
+            cls: 'total-sync-conflict-editor', attr: { rows: '4', 'aria-label': t('Result for', 'Итог для') + ' ' + title },
+          });
+          const choose = (lines: string[]) => {
+            choices.set(part, lines);
+            area.value = lines.join('\n');
+            refreshSave();
+          };
+          area.addEventListener('input', () => {
+            choices.set(part, area.value === '' ? [] : area.value.split('\n'));
+            refreshSave();
+          });
+          new Setting(editor.contentEl)
+            .addButton(control => control.setButtonText(t('Use this device', 'С этого устройства')).onClick(() => choose(part.local)))
+            .addButton(control => control.setButtonText(t('Use cloud', 'Из облака')).onClick(() => choose(part.remote)))
+            .addButton(control => control.setButtonText(t('Keep both', 'Обе версии')).onClick(() => choose([...part.remote, ...part.local])));
+        }
+        new Setting(editor.contentEl).addButton(control => {
+          refreshSave = () => { control.setDisabled(choices.size !== disputed.length); };
+          control.setCta().setButtonText(t('Save merged note', 'Сохранить объединённую заметку')).onClick(async () => {
+            if (choices.size !== disputed.length) return;
+            const text = review.merge.parts.flatMap(part => part.kind === 'text' ? part.lines : choices.get(part)!)
+              .join(review.merge.eol);
+            if (await plugin.resolveConflict(review, text)) editor.close();
+          });
+          refreshSave();
+        });
+        editor.open();
+      }));
+  }
+  modal.open();
 }
 
 function confirm(app: App, title: string, description: string, label: string, action: () => Promise<void>): void {
@@ -296,7 +376,8 @@ export class SettingsTab extends PluginSettingTab {
     }
     const status = new Setting(el).setName(t('Status', 'Состояние'));
     new Setting(el).addButton(btn => btn.setButtonText(t('Sync now', 'Синхронизировать сейчас')).onClick(() => plugin.sync(true)))
-      .addButton(btn => btn.setButtonText(t('Show sync plan', 'Показать план операций')).onClick(() => showPlan(plugin)));
+      .addButton(btn => btn.setButtonText(t('Show sync plan', 'Показать план операций')).onClick(() => showPlan(plugin)))
+      .addButton(btn => btn.setButtonText(t('Resolve conflicts', 'Разобрать конфликты')).onClick(() => showMarkdownConflicts(plugin)));
 
     new Setting(el).setName(t('Data channels', 'Области данных')).setHeading();
     this.toggle('content', 'Content', 'Контент', ['Notes and folders.', 'Заметки и папки.']);

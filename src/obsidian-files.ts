@@ -1,4 +1,5 @@
 import { type Vault, TFile, TFolder } from 'obsidian';
+import type { Fingerprints } from './fingerprints';
 import {
   channels, decode, object, parse, sha256, stamp, SyncError,
   type Channel, type HistoryItem, type LocalEntry, type LocalFiles, type Scan, type Stamp,
@@ -22,6 +23,7 @@ export class ObsidianFiles implements LocalFiles {
     private readonly vault: Vault, private readonly device: string, private readonly maxBytes: number,
     private readonly attachments: boolean, private readonly exclude: readonly string[],
     private readonly preferences: boolean, private readonly excalidraw: boolean,
+    private readonly fingerprints: Fingerprints<TFile>,
   ) {
     this.adapter = vault.adapter;
     this.base = vault.configDir + '/plugins/total-sync/local';
@@ -163,9 +165,16 @@ export class ObsidianFiles implements LocalFiles {
     for (const [path] of this.actual.get(channel) ?? []) {
       if (scan.entries.has(path) || scan.blocked.has(path)) continue;
       try {
-        const bytes = await this.read(channel, path);
-        checkPayload(channel, path, bytes);
-        scan.entries.set(path, { kind: 'file', hash: await sha256(bytes), size: bytes.byteLength });
+        if (channel === 'content') {
+          const file = this.vault.getAbstractFileByPath(this.path(channel, path));
+          if (!(file instanceof TFile)) throw new SyncError('changed');
+          if (file.stat.size > this.maxBytes) throw new SyncError('size');
+          scan.entries.set(path, await this.fingerprints.scan(file, () => file.stat, () => this.vault.readBinary(file)));
+        } else {
+          const bytes = await this.read(channel, path);
+          checkPayload(channel, path, bytes);
+          scan.entries.set(path, { kind: 'file', hash: await sha256(bytes), size: bytes.byteLength });
+        }
       } catch (error) {
         scan.blocked.add(path);
         scan.issues?.add(error instanceof SyncError ? error.code : 'local');

@@ -11,13 +11,14 @@ export interface Selection {
   calendar?: boolean;
   excalidraw?: boolean;
 }
-export type Action = 'push' | 'pull' | 'delete-remote' | 'delete-local' | 'conflict' | 'equal' | 'blocked';
+export type Action = 'push' | 'pull' | 'delete-remote' | 'delete-local' | 'conflict' | 'review' | 'equal' | 'blocked';
 export interface Operation {
   action: Action;
   channel: Channel;
   path: string;
   local?: LocalEntry;
   remote?: RemoteEntry;
+  baseHash?: string;
 }
 export interface Plan {
   operations: Operation[];
@@ -63,6 +64,8 @@ export function planSync(manifest: Manifest, state: SyncState, scans: ReadonlyMa
       const local = scan.entries.get(path);
       const remote = remoteGroup[path];
       const base = Object.prototype.hasOwnProperty.call(baseline, path) ? baseline[path] : undefined;
+      const pending = channel === 'content' ? state.pending?.[path] : undefined;
+      const baseHash = base?.local === base?.remote && base?.remote?.startsWith('file:') ? base.remote.slice(5) : undefined;
       const folder = local?.kind === 'folder' || remote?.kind === 'folder' || base?.local === 'folder';
       if (!selected(channel, path, selection, folder)) continue;
       if (remote === undefined && base?.remote) throw new SyncError('integrity');
@@ -72,6 +75,8 @@ export function planSync(manifest: Manifest, state: SyncState, scans: ReadonlyMa
       const incompatible = !!local && !!remote && remote.kind !== 'deleted' && local.kind !== remote.kind;
       let action: Action = 'equal';
       if (blockedBranches.has(path) || incompatible || hasBlockedParent(path, blockedBranches)) action = 'blocked';
+      else if (pending && local?.kind === 'file' && remote?.kind === 'file'
+        && local.hash === pending.local && remote.hash === pending.remote && local.hash !== remote.hash) action = 'review';
       else if (localStamp !== remoteStamp) {
         const localChanged = localStamp !== (base?.local ?? null);
         const remoteChanged = remoteStamp !== (base?.remote ?? null);
@@ -88,7 +93,7 @@ export function planSync(manifest: Manifest, state: SyncState, scans: ReadonlyMa
         if (scan.blocked.size > 0 || duplicates.size > 0 || (!selection.attachments && folder)) action = 'blocked';
         else deletions++;
       }
-      operations.push({ action, channel, path, local, remote });
+      operations.push({ action, channel, path, local, remote, baseHash });
     }
     if (deletions >= 25 || (deletions >= 2 && deletions / Math.max(1, count) > 0.1)) requiresApproval = true;
   }

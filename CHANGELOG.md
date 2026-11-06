@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6 · Test prerelease
+
+- Merge independent Markdown edits into the original note. Review overlapping edits in Obsidian and recover the two originals from history.
+- Reuse recently verified local fingerprints for unchanged content. Check revision metadata concurrently and transfer up to three small files in parallel while preserving verified publication and local write checks.
+
 ## 0.1.5 · Test prerelease
 
 - Show the elapsed time since the last successful sync in the desktop status bar and TotalSync settings, in Russian and English.

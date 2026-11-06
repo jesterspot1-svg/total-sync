@@ -151,19 +151,41 @@ export class RemoteVault {
 
   async head(known: Checkpoint | null, publishedOnly = false): Promise<Head> {
     const start = known?.revision ?? 0;
-    if (!await this.committed(start)) throw new SyncError(known ? 'integrity' : 'missing');
-    let current = await this.read(start);
+    const [marker, first, next] = await Promise.allSettled([
+      this.committed(start), this.read(start), this.revisionStatus(start + 1),
+    ]);
+    if (marker.status === 'rejected') throw marker.reason;
+    if (!marker.value) throw new SyncError(known ? 'integrity' : 'missing');
+    if (first.status === 'rejected') throw first.reason;
+    if (next.status === 'rejected') throw next.reason;
+    let current = first.value;
     if (known && known.hash !== current.hash) throw new SyncError('integrity');
-    while (await this.committed(current.revision + 1)) {
-      const next = await this.read(current.revision + 1);
-      if (next.manifest.parent !== current.hash) throw new SyncError('integrity');
-      current = next;
+    let status = next.value;
+    while (status === 'committed') {
+      const [entry, following] = await Promise.all([
+        this.read(current.revision + 1), this.revisionStatus(current.revision + 2),
+      ]);
+      if (entry.manifest.parent !== current.hash) throw new SyncError('integrity');
+      current = entry;
+      status = following;
     }
-    if (await this.dav.collection(this.reservation(current.revision + 1))) {
+    if (status === 'reserved') {
       if (!publishedOnly) throw new SyncError('integrity');
       current.pending = true;
     }
     return current;
+  }
+
+  private async revisionStatus(revision: number): Promise<'committed' | 'reserved' | 'absent'> {
+    const [marker, reservation] = await Promise.allSettled([
+      this.committed(revision), this.dav.collection(this.reservation(revision)),
+    ]);
+    if (marker.status === 'rejected') throw marker.reason;
+    if (marker.value) return 'committed';
+    if (reservation.status === 'rejected') throw reservation.reason;
+    if (!reservation.value) return 'absent';
+    // A writer may have published the marker between the two reads.
+    return await this.committed(revision) ? 'committed' : 'reserved';
   }
 
   async headForWrite(known: Checkpoint): Promise<Head> {

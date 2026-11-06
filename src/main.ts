@@ -1,5 +1,6 @@
-import { Notice, Platform, Plugin, requestUrl, type TAbstractFile } from 'obsidian';
-import { SyncEngine } from './engine';
+import { Notice, Platform, Plugin, TFile, requestUrl, type TAbstractFile } from 'obsidian';
+import { SyncEngine, type ConflictReview } from './engine';
+import { Fingerprints } from './fingerprints';
 import { errorText, interfaceLocale, t } from './i18n';
 import { validState } from './manifest';
 import { idPattern, newState, object, SyncError, type Manifest, type Profile, type SyncState } from './model';
@@ -8,7 +9,7 @@ import { RemoteVault } from './repository';
 import { options, prefixes, type Options } from './settings';
 import { formatSyncAge } from './sync-age';
 import { SyncFeedback } from './sync-feedback';
-import { SettingsTab, showHistory, showPlan, showInventory } from './ui';
+import { SettingsTab, showHistory, showPlan, showInventory, showMarkdownConflicts, notifyMarkdownConflicts } from './ui';
 import { collectionResponse, MAIL, mailEndpoint, WebDav, type Transport } from './webdav';
 
 const storageKey = 'total-sync-options-v1';
@@ -47,6 +48,7 @@ export default class TotalSync extends Plugin {
   private ribbon?: HTMLElement;
   private statusItem?: HTMLElement;
   private statusTimer?: Timer;
+  private readonly fingerprints = new Fingerprints<TFile>();
 
   async onload(): Promise<void> {
     this.suspended = Platform.isMobile && document.hidden;
@@ -70,6 +72,7 @@ export default class TotalSync extends Plugin {
     this.addCommand({ id: 'sync-now', name: t('Sync now', 'Синхронизировать сейчас'), callback: () => { void this.sync(true); } });
     this.addCommand({ id: 'show-plan', name: t('Show sync plan', 'Показать план операций'), callback: () => { void showPlan(this); } });
     this.addCommand({ id: 'history', name: t('Show recovery history', 'Показать историю восстановления'), callback: () => { void showHistory(this); } });
+    this.addCommand({ id: 'resolve-conflicts', name: t('Resolve conflicts', 'Разобрать конфликты'), callback: () => showMarkdownConflicts(this) });
     this.addCommand({
       id: 'inventory', name: t('Compare installed plugins', 'Сравнить установленные плагины'),
       checkCallback: checking => {
@@ -95,6 +98,7 @@ export default class TotalSync extends Plugin {
       },
     });
     const changed = (file: TAbstractFile) => {
+      if (file instanceof TFile) this.fingerprints.invalidate(file);
       const path = file.path;
       if (!this.config.change || path.startsWith('.') || /^TotalSync-Recovery(?:\/|$)/i.test(path)) return;
       if (this.working) this.changedWhileWorking = true;
@@ -303,7 +307,7 @@ export default class TotalSync extends Plugin {
 
   files(): ObsidianFiles {
     return new ObsidianFiles(this.app.vault, this.config.device, this.maxBytes, this.config.attachments,
-      prefixes(this.config.exclude), this.config.calendar, this.config.excalidraw);
+      prefixes(this.config.exclude), this.config.calendar, this.config.excalidraw, this.fingerprints);
   }
 
   private engine(files = this.files()): SyncEngine {
@@ -332,6 +336,26 @@ export default class TotalSync extends Plugin {
 
   async history() {
     return this.operate(() => this.engine().history(this.state));
+  }
+
+  pendingConflicts(): string[] {
+    return Object.keys(this.state.pending ?? {}).sort();
+  }
+
+  async reviewConflict(path: string) {
+    return this.operate(() => this.engine().reviewConflict(this.state, path));
+  }
+
+  async resolveConflict(review: ConflictReview, text: string): Promise<boolean> {
+    return !!await this.operate(async () => {
+      if (!this.allowed()) throw new SyncError(this.stateError ? 'integrity' : 'inactive');
+      const state = await this.engine().resolveConflict(this.state, review, text);
+      await this.saveData({ binding: this.config.binding, device: this.config.device, state, lastSuccess: this.lastSuccess });
+      this.state = state;
+      this.record('markdown-conflict-resolved');
+      new Notice(t('Conflict resolved. The original note has been synced.', 'Конфликт разобран. Исходная заметка синхронизирована.'));
+      return true;
+    });
   }
 
   async acceptExcalidraw(): Promise<void> {
@@ -376,7 +400,7 @@ export default class TotalSync extends Plugin {
     this.feedback?.start();
     const outcome = await this.operate(async () => {
       const result = await this.engine().run(this.state, approval);
-      const complete = result.counts.blocked === 0 && result.errors.length === 0;
+      const complete = result.counts.blocked === 0 && result.counts.review === 0 && result.errors.length === 0;
       const lastSuccess = complete ? Date.now() : this.lastSuccess;
       await this.saveData({ binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess });
       this.lastSuccess = lastSuccess;
@@ -385,13 +409,15 @@ export default class TotalSync extends Plugin {
       if (complete) this.retryCount = 0;
       const n = result.counts;
       this.record('sync push=' + n.push + ' pull=' + n.pull + ' deleted=' + (n['delete-local'] + n['delete-remote'])
-        + ' conflicts=' + n.conflict + ' blocked=' + n.blocked + ' checked=' + (n.equal + n.push + n.pull + n.conflict));
+        + ' conflicts=' + n.conflict + ' review=' + n.review + ' merged=' + result.merged
+        + ' blocked=' + n.blocked + ' checked=' + (n.equal + n.push + n.pull + n.conflict + n.review));
       if (!complete) {
-        this.currentError = result.errors[0] ?? 'path';
+        this.currentError = result.errors[0] ?? (n.review ? 'merge-conflict' : 'path');
         this.record(this.currentError);
         this.retryAfterFailure(this.currentError);
       }
-      if (n.conflict) new Notice(t('TotalSync saved conflicting versions. Check conflict copies and history.', 'TotalSync сохранил конфликтующие версии. Проверьте копии и историю.'));
+      if (result.newConflicts) notifyMarkdownConflicts(this);
+      if (n.conflict > result.merged) new Notice(t('TotalSync saved conflicting versions. Check conflict copies and history.', 'TotalSync сохранил конфликтующие версии. Проверьте копии и историю.'));
       if (result.desktopChanged) new Notice(t('Desktop settings changed. Close and reopen the vault to apply them.', 'Настройки Windows изменились. Закройте и заново откройте хранилище для их применения.'));
       return {
         error: complete ? null : this.currentError,

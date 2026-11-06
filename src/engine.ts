@@ -1,8 +1,9 @@
 import {
   channels, encode, newState, RETENTION, sha256, stamp, SyncError,
   type Channel, type Checkpoint, type HistoryItem, type LocalEntry, type LocalFiles,
-  type Manifest, type RemoteEntry, type RemoteFile, type Scan, type SyncState, type Profile,
+  type Manifest, type PendingConflict, type RemoteEntry, type RemoteFile, type Scan, type SyncState, type Profile,
 } from './model';
+import { markdownText, maxMergeBytes, mergeMarkdown, type MarkdownMerge } from './markdown-merge';
 import { checkPayload, EXCALIDRAW_PROFILE, pathKey } from './policy';
 import { planSync, type Action, type Operation, type Plan, type Selection } from './planner';
 import { RemoteVault, type Head } from './repository';
@@ -25,6 +26,14 @@ export interface Result {
   errors: SyncError['code'][];
   devices: Manifest['devices'];
   desktopChanged: boolean;
+  merged: number;
+  newConflicts: number;
+}
+
+export interface ConflictReview {
+  path: string;
+  pending: PendingConflict;
+  merge: MarkdownMerge;
 }
 
 type Inspection = Preview & { scans: Map<Channel, Scan> };
@@ -32,8 +41,17 @@ type CloudWork = {
   head: Head;
   failed: Set<Operation>;
   conflicts: Map<Operation, { path: string; file: RemoteFile }>;
+  merges: Map<Operation, RemoteFile>;
+  pending: Map<Operation, PendingConflict>;
   unsafeDelete: Set<Channel>;
 };
+
+const transferBatch = 3;
+const smallFile = 2 * 1024 * 1024;
+
+function* batches<T>(items: T[]): Generator<T[]> {
+  for (let i = 0; i < items.length; i += transferBatch) yield items.slice(i, i + transferBatch);
+}
 
 function ordered(ops: Operation[]): Operation[] {
   const order = (op: Operation) => op.action.startsWith('delete') ? 2
@@ -44,10 +62,11 @@ function ordered(ops: Operation[]): Operation[] {
     || a.path.localeCompare(b.path));
 }
 
-function copyState(state: SyncState, checkpoint: Checkpoint): SyncState {
+function copyState(state: SyncState, checkpoint: Checkpoint) {
   const copy = newState();
   copy.checkpoint = { revision: checkpoint.revision, hash: checkpoint.hash };
   for (const channel of channels) Object.assign(copy.base[channel], state.base[channel]);
+  Object.assign(copy.pending, state.pending);
   return copy;
 }
 
@@ -121,7 +140,9 @@ export class SyncEngine {
         || ops.some(op => op.action === 'push' || op.action.startsWith('delete') || (op.action === 'conflict' && !!op.local))
         || head.manifest.garbage.length > 0
         || (expiration !== null && head.manifest.history.some(item => item.at <= expiration));
-      const cloud: CloudWork = { head, failed: new Set(), conflicts: new Map(), unsafeDelete: new Set() };
+      const cloud: CloudWork = {
+        head, failed: new Set(), conflicts: new Map(), merges: new Map(), pending: new Map(), unsafeDelete: new Set(),
+      };
       let readOnly = false;
       if (needsLock) {
         try {
@@ -148,14 +169,19 @@ export class SyncEngine {
     manifest.history.push({ id: crypto.randomUUID(), channel: op.channel, path: op.path, reason, at: now, file });
   }
 
-  private async upload(op: Operation, now: number): Promise<RemoteFile> {
+  private async verifiedLocal(op: Operation): Promise<{ bytes: ArrayBuffer; hash: string }> {
     if (op.local?.kind !== 'file') throw new SyncError('local');
     if (op.local.size > this.options.maxBytes) throw new SyncError('size');
     const bytes = await this.local.read(op.channel, op.path);
     if (bytes.byteLength !== op.local.size || await sha256(bytes) !== op.local.hash) throw new SyncError('changed');
     checkPayload(op.channel, op.path, bytes);
+    return { bytes, hash: op.local.hash };
+  }
+
+  private async upload(op: Operation, now: number): Promise<RemoteFile> {
+    const { bytes, hash } = await this.verifiedLocal(op);
     this.active();
-    return this.remote.upload(op.channel, bytes, op.local.hash, this.options.device, now);
+    return this.remote.upload(op.channel, bytes, hash, this.options.device, now);
   }
 
   private async bytes(channel: Channel, path: string, entry: RemoteFile): Promise<ArrayBuffer> {
@@ -165,10 +191,92 @@ export class SyncEngine {
     return bytes;
   }
 
-  private async pull(op: Operation, entry: RemoteEntry | undefined): Promise<void> {
-    const bytes = entry?.kind === 'file' ? await this.bytes(op.channel, op.path, entry) : undefined;
+  private async pull(op: Operation, entry: RemoteEntry | undefined, prefetched?: ArrayBuffer): Promise<void> {
+    const bytes = entry?.kind === 'file' ? prefetched ?? await this.bytes(op.channel, op.path, entry) : undefined;
     this.active();
     await this.local.apply(op.channel, op.path, stamp(op.local), entry?.kind === 'deleted' ? null : entry ?? null, bytes);
+  }
+
+  private async markdownVersions(op: Operation, manifest: Manifest) {
+    if (op.channel !== 'content' || !/\.md$/i.test(op.path) || op.local?.kind !== 'file' || op.remote?.kind !== 'file'
+      || op.local.size > maxMergeBytes || op.remote.size > maxMergeBytes) return undefined;
+    const [{ bytes: localBytes }, remoteBytes] = await Promise.all([
+      this.verifiedLocal(op), this.bytes('content', op.path, op.remote),
+    ]);
+    const local = markdownText(localBytes);
+    const remote = markdownText(remoteBytes);
+    if (local === undefined || remote === undefined) return undefined;
+    const ancestor = manifest.history.find(item => item.channel === 'content' && item.path === op.path
+      && item.file.hash === op.baseHash && item.file.size <= maxMergeBytes);
+    let base: string | undefined;
+    if (ancestor) {
+      try {
+        base = markdownText(await this.bytes('content', op.path, ancestor.file));
+      } catch (error) {
+        if (!(error instanceof SyncError) || !['missing', 'integrity'].includes(error.code)) throw error;
+      }
+    }
+    return { localBytes, merge: mergeMarkdown(base, local, remote) };
+  }
+
+  private async archiveMarkdown(manifest: Manifest, op: Operation, localBytes: ArrayBuffer, now: number): Promise<RemoteFile> {
+    if (op.local?.kind !== 'file' || op.remote?.kind !== 'file') throw new SyncError('changed');
+    const hash = op.local.hash;
+    let local = manifest.history.find(item => item.channel === 'content' && item.path === op.path
+      && item.file.hash === hash && item.reason === 'conflict' && now - item.at < RETENTION)?.file;
+    if (local) {
+      try {
+        await this.remote.download('content', local);
+      } catch (error) {
+        if (!(error instanceof SyncError) || !['missing', 'integrity'].includes(error.code)) throw error;
+        local = undefined;
+      }
+    }
+    this.active();
+    local ??= await this.remote.upload('content', localBytes, hash, this.options.device, now);
+    this.archive(manifest, op, local, 'conflict', now);
+    this.archive(manifest, op, op.remote, 'conflict', now);
+    return local;
+  }
+
+  private async mergedFile(bytes: ArrayBuffer, local: RemoteFile, remote: RemoteFile, now: number): Promise<RemoteFile> {
+    if (bytes.byteLength > this.options.maxBytes) throw new SyncError('size');
+    const hash = await sha256(bytes);
+    if (hash === remote.hash) return remote;
+    if (hash === local.hash) return local;
+    this.active();
+    return this.remote.upload('content', bytes, hash, this.options.device, now);
+  }
+
+  private async stageSmallUploads(deferred: Operation[], now: number, failed: Set<Operation>, errors: Result['errors']) {
+    const files = deferred.filter(op => op.action === 'push' && op.local?.kind === 'file' && op.local.size <= smallFile);
+    const staged = new Map<Operation, RemoteFile>();
+    for (const batch of batches(files)) {
+      this.active();
+      const results = await Promise.allSettled(batch.map(op => this.upload(op, now)));
+      for (const [index, result] of results.entries()) {
+        const op = batch[index]!;
+        if (result.status === 'fulfilled') staged.set(op, result.value);
+        else this.fileFailure(result.reason, op, failed, errors);
+      }
+    }
+    return staged;
+  }
+
+  private async *prefetchSmallPulls(ops: Operation[], manifest: Manifest) {
+    for (const batch of batches(ops)) {
+      this.active();
+      const prefetched = await Promise.all(batch.map(async op => {
+        const file = manifest.files[op.channel][op.path];
+        if (op.action !== 'pull' || file?.kind !== 'file' || file.size > smallFile) return { op };
+        try {
+          return { op, bytes: await this.bytes(op.channel, op.path, file) };
+        } catch (error) {
+          return { op, failedRead: { error } };
+        }
+      }));
+      yield* prefetched;
+    }
   }
 
   private addParents(manifest: Manifest, path: string, scan: Scan | undefined, now: number): void {
@@ -222,14 +330,31 @@ export class SyncEngine {
     for (const path of preview.scans.get('content')?.entries.keys() ?? []) aliases.set(pathKey(path), path);
     let dirty = manifest.devices[this.options.device] !== this.options.profile;
     manifest.devices[this.options.device] = this.options.profile;
+    const staged = await this.stageSmallUploads(deferred, now, failed, errors);
 
     for (const op of deferred) {
       this.active();
-      if (op.action !== 'push' && op.action !== 'conflict') continue;
+      if (failed.has(op) || (op.action !== 'push' && op.action !== 'conflict')) continue;
       const group = manifest.files[op.channel];
       try {
         if (op.action === 'conflict' && op.local?.kind === 'file' && op.remote?.kind === 'file') {
           if (op.channel === 'content') {
+            const markdown = await this.markdownVersions(op, manifest);
+            if (markdown) {
+              const historySize = manifest.history.length;
+              const local = await this.archiveMarkdown(manifest, op, markdown.localBytes, now);
+              if (markdown.merge.parts.some(part => part.kind === 'conflict')) {
+                work.pending.set(op, { local: op.local.hash, remote: op.remote.hash, base: op.baseHash ?? null });
+              } else {
+                const bytes = encode(markdown.merge.parts.flatMap(part => part.kind === 'text' ? part.lines : []).join(markdown.merge.eol));
+                const file = await this.mergedFile(bytes, local, op.remote, now);
+                group[op.path] = file;
+                work.merges.set(op, file);
+                dirty ||= file.hash !== op.remote.hash;
+              }
+              dirty ||= historySize !== manifest.history.length;
+              continue;
+            }
             const path = conflictPath(op.path, op.remote, op.local, this.options.device);
             const existing = group[path];
             const localCopy = preview.scans.get('content')?.entries.get(path);
@@ -253,7 +378,7 @@ export class SyncEngine {
         if (!op.local) continue;
         if (op.local.kind === 'folder') await this.local.verify(op.channel, op.path, 'folder');
         const next: RemoteEntry = op.local.kind === 'folder'
-          ? { kind: 'folder', at: now, device: this.options.device } : await this.upload(op, now);
+          ? { kind: 'folder', at: now, device: this.options.device } : staged.get(op) ?? await this.upload(op, now);
         if (op.channel === 'content') this.addParents(manifest, op.path, preview.scans.get('content'), now);
         if (op.remote?.kind === 'file') this.archive(manifest, op, op.remote, 'updated', now);
         group[op.path] = next;
@@ -306,20 +431,34 @@ export class SyncEngine {
   ): Promise<Result> {
     const { head, failed, conflicts, unsafeDelete } = work;
     const manifest = head.manifest;
-    const counts: Result['counts'] = { push: 0, pull: 0, 'delete-remote': 0, 'delete-local': 0, conflict: 0, equal: 0, blocked: 0 };
+    const counts: Result['counts'] = {
+      push: 0, pull: 0, 'delete-remote': 0, 'delete-local': 0, conflict: 0, review: 0, equal: 0, blocked: 0,
+    };
     const next = copyState(state, head);
     let desktopChanged = false;
+    let merged = 0;
+    let newConflicts = 0;
 
-    for (const op of deferred) {
+    for await (const { op, bytes, failedRead } of this.prefetchSmallPulls(deferred, manifest)) {
       this.active();
       if (op.action === 'blocked' || failed.has(op)
-        || (readOnly && op.action !== 'equal' && op.action !== 'pull')) {
+        || (readOnly && op.action !== 'equal' && op.action !== 'pull' && op.action !== 'review')) {
         counts.blocked++;
         continue;
       }
       const current = manifest.files[op.channel][op.path];
       let localStamp = stamp(op.local);
       try {
+        if (failedRead) throw failedRead.error;
+        const pending = work.pending.get(op);
+        if (pending) {
+          next.pending[op.path] = pending;
+          newConflicts++;
+        }
+        if (pending || op.action === 'review') {
+          counts.review++;
+          continue;
+        }
         const conflict = conflicts.get(op);
         if (conflict) {
           const localCopy = preview.scans.get(op.channel)?.entries.get(conflict.path);
@@ -330,19 +469,80 @@ export class SyncEngine {
           counts.blocked++;
           continue;
         }
-        if (op.action === 'pull' || op.action === 'delete-local' || conflict || (op.action === 'conflict' && !op.local)) {
-          if (stamp(current) !== 'deleted' || op.local) await this.pull(op, current);
+        const mergedFile = work.merges.get(op);
+        if (op.action === 'pull' || op.action === 'delete-local' || conflict || mergedFile || (op.action === 'conflict' && !op.local)) {
+          if (stamp(current) !== 'deleted' || op.local) await this.pull(op, current, bytes);
           localStamp = current?.kind === 'deleted' ? null : stamp(current);
           if (op.channel === 'desktop-config' && !op.path.startsWith('inventory/')) desktopChanged = true;
         }
+        if (mergedFile) merged++;
         next.base[op.channel][op.path] = { local: localStamp, remote: stamp(current) };
+        if (op.channel === 'content') delete next.pending[op.path];
         counts[op.action]++;
       } catch (error) {
         this.fileFailure(error, op, failed, errors, true);
         counts.blocked++;
       }
     }
-    return { state: next, counts, errors, desktopChanged, devices: manifest.devices };
+    return { state: next, counts, errors, desktopChanged, devices: manifest.devices, merged, newConflicts };
+  }
+
+  private async pendingOperation(path: string, pending: PendingConflict, head: Head): Promise<Operation> {
+    if (!this.options.selection.channels.includes('content')) throw new SyncError('configuration');
+    const scan = await this.local.scan('content');
+    const local = scan.entries.get(path);
+    const remote = head.manifest.files.content[path];
+    if (local?.kind !== 'file' || local.hash !== pending.local || scan.blocked.has(path)
+      || remote?.kind !== 'file' || remote.hash !== pending.remote) throw new SyncError('changed');
+    return { action: 'conflict', channel: 'content', path, local, remote, baseHash: pending.base ?? undefined };
+  }
+
+  reviewConflict(state: SyncState, path: string): Promise<ConflictReview> {
+    return this.exclusive(async () => {
+      const pending = state.pending?.[path];
+      if (!pending) throw new SyncError('changed');
+      const head = await this.remote.head(state.checkpoint, true);
+      const op = await this.pendingOperation(path, pending, head);
+      const versions = await this.markdownVersions(op, head.manifest);
+      if (!versions) throw new SyncError('changed');
+      return { path, pending, merge: versions.merge };
+    });
+  }
+
+  resolveConflict(state: SyncState, review: ConflictReview, text: string): Promise<SyncState> {
+    return this.exclusive(async () => {
+      const { path, pending: expected } = review;
+      const pending = state.pending?.[path];
+      if (!pending || pending.local !== expected.local || pending.remote !== expected.remote || pending.base !== expected.base) {
+        throw new SyncError('changed');
+      }
+      const bytes = encode(text);
+      if (bytes.byteLength > Math.min(2 * maxMergeBytes, this.options.maxBytes)) throw new SyncError('size');
+      const head = await this.remote.head(state.checkpoint, true);
+      const op = await this.pendingOperation(path, pending, head);
+      const versions = await this.markdownVersions(op, head.manifest);
+      if (!versions || op.remote?.kind !== 'file') throw new SyncError('changed');
+      const remote = op.remote;
+      const now = this.now();
+      const { latest, file } = await this.remote.write(async () => {
+        const current = await this.remote.headForWrite(head);
+        if (current.hash !== head.hash) throw new SyncError('cloud-advanced');
+        await this.local.verify('content', path, 'file:' + pending.local);
+        const local = await this.archiveMarkdown(current.manifest, op, versions.localBytes, now);
+        const file = await this.mergedFile(bytes, local, remote, now);
+        current.manifest.files.content[path] = file;
+        current.manifest.at = now;
+        this.active();
+        const latest = await this.remote.publish(current.manifest, current);
+        return { latest, file };
+      });
+      this.active();
+      await this.local.apply('content', path, 'file:' + pending.local, file, bytes);
+      const next = copyState(state, latest);
+      next.base.content[path] = { local: stamp(file), remote: stamp(file) };
+      delete next.pending[path];
+      return next;
+    });
   }
 
   private fileFailure(error: unknown, op: Operation, failed: Set<Operation>, errors: Result['errors'], localPhase = false): void {
