@@ -7,6 +7,7 @@ import type { Action } from './planner';
 import { catalogInstallCommand } from './policy';
 import type { Options } from './settings';
 import { MAIL } from './webdav';
+import { showPluginProfiles } from './plugin-ui';
 
 const project = 'https://github.com/jesterspot1-svg/total-sync';
 
@@ -422,20 +423,26 @@ export class SettingsTab extends PluginSettingTab {
     this.toggle('bookmarks', 'Bookmarks snapshots', 'Снимки закладок',
       ['Publish and export snapshots through the command palette.', 'Публикация и экспорт снимков через палитру команд.']);
     if (plugin.profile === 'windows') {
+      this.toggle('plugins', 'Sync plugins and settings', 'Синхронизировать плагины и настройки',
+        ['Set up a shared Windows plugin profile below. Code from outside the catalog requires a trusted source.',
+          'Настройте общий профиль Windows кнопкой ниже. Для кода вне каталога подтвердите источник.'], () => this.display());
+      buttonRow(el).addButton(btn => btn.setButtonText(t('Plugins and settings', 'Плагины и настройки')).onClick(() => showPluginProfiles(plugin)));
       this.toggle('desktop', 'Windows settings', 'Настройки Windows',
         ['Allowed vault settings, styles and plugin inventory.', 'Разрешённые настройки vault, стили и инвентарь плагинов.']);
-      this.toggle('calendar', 'Calendar preferences', 'Настройки Calendar',
-        ['Syncs a small allowlist of typed preferences. Enable on each Windows client.', 'Синхронизирует небольшой перечень проверяемых параметров. Включите на каждом Windows-клиенте.']);
-      this.toggle('excalidraw', 'Excalidraw preferences', 'Настройки Excalidraw',
-        ['Update TotalSync on every device first. Syncs approved preferences of an installed Excalidraw 2.29.x.',
-          'Сначала обновите TotalSync на всех устройствах. Переносит проверенные настройки установленного Excalidraw 2.29.x.']);
-      new Setting(el).addButton(btn => btn
-        .setButtonText(t('Accept cloud Excalidraw preferences', 'Принять настройки Excalidraw из облака'))
-        .onClick(() => confirm(plugin.app,
-          t('Use the cloud Excalidraw profile', 'Применить облачный профиль Excalidraw'),
-          t('The cloud profile replaces the synchronized preferences. The previous portable settings are backed up locally.',
-            'Профиль из облака заменит синхронизируемые параметры. Предыдущие переносимые настройки сохранятся в локальной копии.'),
-          t('Apply profile', 'Применить профиль'), () => plugin.acceptExcalidraw())));
+      if (!plugin.config.plugins) {
+        this.toggle('calendar', 'Calendar preferences', 'Настройки Calendar',
+          ['Syncs a small allowlist of typed preferences. Enable on each Windows client.', 'Синхронизирует небольшой перечень проверяемых параметров. Включите на каждом Windows-клиенте.']);
+        this.toggle('excalidraw', 'Excalidraw preferences', 'Настройки Excalidraw',
+          ['Update TotalSync on every device first. Syncs approved preferences of an installed Excalidraw 2.29.x.',
+            'Сначала обновите TotalSync на всех устройствах. Переносит проверенные настройки установленного Excalidraw 2.29.x.']);
+        new Setting(el).addButton(btn => btn
+          .setButtonText(t('Accept cloud Excalidraw preferences', 'Принять настройки Excalidraw из облака'))
+          .onClick(() => confirm(plugin.app,
+            t('Use the cloud Excalidraw profile', 'Применить облачный профиль Excalidraw'),
+            t('The cloud profile replaces the synchronized preferences. The previous portable settings are backed up locally.',
+              'Профиль из облака заменит синхронизируемые параметры. Предыдущие переносимые настройки сохранятся локально.'),
+            t('Apply profile', 'Применить профиль'), () => plugin.acceptExcalidraw())));
+      }
       new Setting(el).addButton(btn => btn.setButtonText(t('Compare installed plugins', 'Сравнить установленные плагины')).onClick(() => showInventory(plugin)));
     }
     new Setting(el).setName(t('Excluded content paths', 'Исключённые пути контента'))

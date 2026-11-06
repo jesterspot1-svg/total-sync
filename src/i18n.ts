@@ -34,6 +34,11 @@ export function errorText(code: SyncError['code']): string {
     local: ['The local operation failed. Check free space and vault access.', 'Локальная операция не удалась. Проверьте свободное место и доступ к хранилищу.'],
     inactive: ['TotalSync is paused or the vault is closed.', 'TotalSync приостановлен или хранилище закрыто.'],
     cancelled: ['Sync stopped', 'Синхронизация остановлена'],
+    'plugin-pending': ['Open Plugins and settings in TotalSync to set up, apply or review plugin changes.', 'Откройте «Плагины и настройки» в TotalSync: настройте профиль, примените или проверьте изменения плагинов.'],
+    'plugin-trust': ['This exact package is unavailable in the catalog. Verify and trust its source device in Plugins and settings.', 'Точный пакет недоступен в каталоге. Сверьте и подтвердите ноутбук-источник в разделе «Плагины и настройки».'],
+    'plugin-key': ['The fingerprint does not match. Copy it from the selected source laptop, not from a different device.', 'Отпечаток не совпал. Скопируйте его с выбранного ноутбука-источника, а не с другого устройства.'],
+    'plugin-version': ['This plugin version is incompatible with your Obsidian. The previous installation was preserved.', 'Версия плагина несовместима с Obsidian. Прежняя установка сохранена.'],
+    'plugin-recovery': ['A plugin installation was interrupted. Open Plugins and settings and choose Restore installation.', 'Установка плагина была прервана. Откройте «Плагины и настройки» и нажмите «Восстановить установку».'],
   };
   return t(...messages[code]);
 }

@@ -1,4 +1,4 @@
-import { Notice, Platform, Plugin, TFile, requestUrl, type TAbstractFile } from 'obsidian';
+import { Notice, Platform, Plugin, TFile, requestUrl, requireApiVersion, type TAbstractFile } from 'obsidian';
 import { SyncEngine, type ConflictChoice, type ConflictReview, type SyncControls } from './engine';
 import { Fingerprints } from './fingerprints';
 import { errorText, interfaceLocale, t } from './i18n';
@@ -11,6 +11,11 @@ import { formatSyncAge } from './sync-age';
 import { SyncFeedback } from './sync-feedback';
 import { SettingsTab, showHistory, showPlan, showInventory, showMarkdownConflicts, notifyMarkdownConflicts } from './ui';
 import { collectionResponse, MAIL, mailEndpoint, WebDav, type Transport } from './webdav';
+import { PluginFiles, type PluginRuntime } from './plugin-disk';
+import { newSigningKey } from './plugin-profile';
+import { PluginSync } from './plugin-sync';
+import { PluginCatalog, PluginTransfer } from './plugin-transfer';
+import { showPluginProfiles } from './plugin-ui';
 
 const storageKey = 'total-sync-options-v1';
 const secretKey = 'total-sync-mail-webdav';
@@ -51,6 +56,10 @@ export default class TotalSync extends Plugin {
   private statusItem?: HTMLElement;
   private statusTimer?: Timer;
   private readonly fingerprints = new Fingerprints<TFile>();
+  private pluginService?: PluginSync;
+  private pluginServiceKey = '';
+  private pluginWatchTimer?: Timer;
+  private pluginWatchStamp = '';
 
   async onload(): Promise<void> {
     this.suspended = Platform.isMobile && document.hidden;
@@ -75,6 +84,12 @@ export default class TotalSync extends Plugin {
     this.addCommand({ id: 'show-plan', name: t('Show sync plan', 'Показать план операций'), callback: () => { void showPlan(this); } });
     this.addCommand({ id: 'history', name: t('Show recovery history', 'Показать историю восстановления'), callback: () => { void showHistory(this); } });
     this.addCommand({ id: 'resolve-conflicts', name: t('Resolve conflicts', 'Разобрать конфликты'), callback: () => showMarkdownConflicts(this) });
+    this.addCommand({ id: 'plugin-profiles', name: t('Plugins and settings', 'Плагины и настройки'),
+      checkCallback: checking => {
+        if (this.profile !== 'windows') return false;
+        if (!checking) void showPluginProfiles(this);
+        return true;
+      } });
     this.addCommand({
       id: 'inventory', name: t('Compare installed plugins', 'Сравнить установленные плагины'),
       checkCallback: checking => {
@@ -135,6 +150,7 @@ export default class TotalSync extends Plugin {
     window.clearTimeout(this.debounceTimer);
     window.clearTimeout(this.retryTimer);
     window.clearInterval(this.periodicTimer);
+    window.clearInterval(this.pluginWatchTimer);
     window.clearTimeout(this.statusTimer);
     this.feedback?.dispose();
     this.feedback = undefined;
@@ -181,6 +197,7 @@ export default class TotalSync extends Plugin {
       const credential = this.credential(login, password);
       const result = await RemoteVault.probe(this.dav(endpoint, credential));
       this.app.secretStorage.setSecret(secretKey, JSON.stringify(credential));
+      this.pluginService = undefined;
       this.update({ exclusiveMove: result.exclusiveMove });
       this.record(result.exclusiveMove ? 'probe-exclusive-move' : result.move ? 'probe-move' : 'probe');
       new Notice(t('WebDAV verified. App password saved locally.', 'WebDAV проверен. Пароль приложения сохранён локально.'));
@@ -276,8 +293,21 @@ export default class TotalSync extends Plugin {
 
   private configureTimer(): void {
     window.clearInterval(this.periodicTimer);
+    window.clearInterval(this.pluginWatchTimer);
     if (this.config.interval > 0 && this.config.enabled && !this.stopped) {
       this.periodicTimer = window.setInterval(() => { if (this.allowed()) void this.sync(false); }, this.config.interval * 60_000);
+    }
+    if (this.profile === 'windows' && this.config.plugins && this.config.change && this.config.enabled && !this.stopped) {
+      this.pluginWatchTimer = window.setInterval(() => {
+        if (this.working || !this.allowed()) return;
+        void (async () => {
+          try {
+            const stamp = await this.pluginProfiles().files.watchStamp();
+            if (this.pluginWatchStamp && stamp !== this.pluginWatchStamp) this.debounce();
+            this.pluginWatchStamp = stamp;
+          } catch { /* The next explicit or periodic sync reports filesystem errors. */ }
+        })();
+      }, 15_000);
     }
   }
 
@@ -313,7 +343,110 @@ export default class TotalSync extends Plugin {
 
   files(): ObsidianFiles {
     return new ObsidianFiles(this.app.vault, this.config.device, this.maxBytes, this.config.attachments,
-      prefixes(this.config.exclude), this.config.calendar, this.config.excalidraw, this.fingerprints);
+      prefixes(this.config.exclude), !this.config.plugins && this.config.calendar, !this.config.plugins && this.config.excalidraw, this.fingerprints);
+  }
+
+  pluginProfiles(): PluginSync {
+    if (this.profile !== 'windows' || !this.config.binding || this.stateError) throw new SyncError('inactive');
+    const credential = this.credentials();
+    if (!credential) throw new SyncError('configuration');
+    const scope = this.config.binding + '-' + this.config.device;
+    if (this.pluginService && this.pluginServiceKey === scope) return this.pluginService;
+    type Manager = {
+      plugins: Record<string, { onExternalSettingsChange?: () => unknown }>; disablePlugin(id: string): Promise<void>;
+      enablePluginAndSave(id: string): Promise<void>; disablePluginAndSave(id: string): Promise<void>;
+      loadManifests(): Promise<void>; saveConfig(): Promise<void>;
+    };
+    const manager = (this.app as unknown as { plugins?: Manager }).plugins;
+    const requireManager = (): Manager => {
+      if (!manager || !object(manager.plugins) || ['disablePlugin', 'enablePluginAndSave', 'disablePluginAndSave', 'loadManifests', 'saveConfig']
+        .some(name => typeof manager[name as keyof Manager] !== 'function')) throw new SyncError('plugin-version');
+      return manager;
+    };
+    const runtime: PluginRuntime = {
+      loaded: id => !!requireManager().plugins[id],
+      unload: async id => {
+        const current = requireManager();
+        await current.disablePlugin(id);
+        if (current.plugins[id]) throw new SyncError('local');
+      },
+      reloadManifests: async () => { await requireManager().loadManifests(); },
+      enable: async (id, enabled) => {
+        const current = requireManager();
+        if (enabled) {
+          await current.enablePluginAndSave(id);
+          if (!current.plugins[id]) throw new SyncError('local');
+        } else await current.disablePluginAndSave(id);
+        // Native enable/disable only schedule saving; await the actual persisted list before verification.
+        await current.saveConfig();
+      },
+      compatible: version => requireApiVersion(version),
+      canReloadSettings: id => typeof requireManager().plugins[id]?.onExternalSettingsChange === 'function',
+      reloadSettings: async id => { await requireManager().plugins[id]?.onExternalSettingsChange?.(); },
+    };
+    const extra = this.app.loadLocalStorage('total-sync-plugin-fields-' + scope) as unknown;
+    if (extra !== null && extra !== undefined && (!object(extra)
+      || !Object.values(extra).every(value => Array.isArray(value) && value.every(key => typeof key === 'string')))) throw new SyncError('integrity');
+    const check = () => {
+      if (this.stopped || this.suspended) throw new SyncError('inactive');
+      if (this.syncController?.signal.aborted) throw new SyncError('cancelled');
+    };
+    const catalog = new PluginCatalog(async url => {
+      check();
+      try {
+        const response = await requestUrl({ url, method: 'GET', throw: false });
+        if (response.status !== 200) throw new SyncError(response.status === 404 ? 'missing' : response.status === 429 ? 'rate' : 'network', response.status);
+        return response.arrayBuffer;
+      } catch (error) { if (error instanceof SyncError) throw error; throw new SyncError('network'); }
+    });
+    this.pluginService = new PluginSync(new PluginFiles(this.app.vault.adapter, this.app.vault.configDir, runtime,
+      (extra ?? {}) as Record<string, string[]>), new PluginTransfer(this.dav(MAIL, credential), this.config.binding, check),
+    catalog, this.config.binding, this.config.device, {
+      read: () => this.app.loadLocalStorage('total-sync-plugin-state-' + scope) as unknown,
+      write: value => this.app.saveLocalStorage('total-sync-plugin-state-' + scope, value),
+      signingKey: async () => {
+        const key = 'total-sync-plugin-signing-' + scope;
+        let value = this.app.secretStorage.getSecret(key);
+        if (!value) { value = await newSigningKey(); this.app.secretStorage.setSecret(key, value); }
+        return value;
+      },
+    }, check, (completed, total) => this.feedback?.progress(completed, total));
+    this.pluginServiceKey = scope;
+    return this.pluginService;
+  }
+
+  async pluginDevices(): Promise<string[]> {
+    if (this.profile !== 'windows' || !this.config.binding || this.stateError) throw new SyncError('inactive');
+    const credential = this.credentials();
+    if (!credential) throw new SyncError('configuration');
+    const head = await new RemoteVault(this.dav(MAIL, credential), this.config.binding).head(this.state.checkpoint, true);
+    this.devices = head.manifest.devices;
+    return Object.keys(this.devices).filter(id => this.devices[id] === 'windows');
+  }
+
+  savePluginFields(): void {
+    this.app.saveLocalStorage('total-sync-plugin-fields-' + this.config.binding + '-' + this.config.device,
+      this.pluginProfiles().files.extra);
+  }
+
+  async syncPlugins(apply: boolean): Promise<void> {
+    if (!this.allowed() || !this.config.plugins) throw new SyncError('inactive');
+    const service = this.pluginProfiles();
+    if (!service.configured()) throw new SyncError('plugin-pending');
+    const expected = apply ? service.planSignature() : undefined;
+    const controller = new AbortController();
+    this.syncController = controller;
+    this.feedback?.start();
+    try {
+      const rows = await service.run(await this.pluginDevices(), apply, expected, true);
+      const pending = rows.filter(row => row.status !== 'same' && row.status !== 'excluded').length;
+      this.record('plugins ready=' + rows.filter(row => row.status === 'same').length + ' pending=' + pending);
+      this.feedback?.finish(pending ? 'error' : 'success', pending ? errorText('plugin-pending') : t('Plugin profile synced', 'Профиль плагинов синхронизирован'));
+    } catch (error) {
+      const code = error instanceof SyncError ? error.code : 'local';
+      this.feedback?.finish(code === 'cancelled' ? 'cancelled' : 'error', errorText(code));
+      throw error;
+    } finally { this.syncController = undefined; }
   }
 
   private engine(files = this.files(), controls?: SyncControls): SyncEngine {
@@ -335,8 +468,8 @@ export default class TotalSync extends Plugin {
           ...(this.config.bookmarks ? ['shared-state' as const] : []),
           ...(this.profile === 'windows' && this.config.desktop ? ['desktop-config' as const] : []),
         ],
-        attachments: this.config.attachments, exclude: prefixes(this.config.exclude), calendar: this.config.calendar,
-        excalidraw: this.profile === 'windows' && this.config.excalidraw,
+        attachments: this.config.attachments, exclude: prefixes(this.config.exclude), calendar: !this.config.plugins && this.config.calendar,
+        excalidraw: this.profile === 'windows' && !this.config.plugins && this.config.excalidraw,
       },
     });
   }
@@ -429,6 +562,17 @@ export default class TotalSync extends Plugin {
         signal: controller.signal,
         progress: (completed, total) => this.feedback?.progress(completed, total),
       }).run(this.state, approval);
+      // Note checkpoints are durable even if the separate plugin operation subsequently fails.
+      await this.saveData({ binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess: this.lastSuccess });
+      this.state = result.state;
+      this.devices = result.devices;
+      if (this.profile === 'windows' && this.config.plugins) {
+        const service = this.pluginProfiles();
+        if (!service.configured()) throw new SyncError('plugin-pending');
+        const rows = await service.run(Object.keys(result.devices).filter(id => result.devices[id] === 'windows'), false, undefined, manual);
+        this.record('plugins ready=' + rows.filter(row => row.status === 'same').length + ' pending=' + rows.filter(row => row.status !== 'same').length);
+        if (rows.some(row => row.status !== 'same' && row.status !== 'excluded')) result.errors.push('plugin-pending');
+      }
       const complete = result.counts.blocked === 0 && result.counts.review === 0 && result.errors.length === 0;
       const lastSuccess = complete ? Date.now() : this.lastSuccess;
       await this.saveData({ binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess });

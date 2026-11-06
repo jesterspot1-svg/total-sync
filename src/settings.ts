@@ -10,6 +10,7 @@ export interface Options {
   content: boolean;
   attachments: boolean;
   desktop: boolean;
+  plugins: boolean;
   bookmarks: boolean;
   calendar: boolean;
   excalidraw: boolean;
@@ -42,7 +43,7 @@ export function options(data: unknown): Options {
     binding, device: typeof stored.device === 'string' && idPattern.test(stored.device) ? stored.device : crypto.randomUUID(),
     enabled: bool('enabled', false), ribbonButton: bool('ribbonButton', false),
     content: bool('content', true), attachments: bool('attachments', true),
-    desktop: bool('desktop', true), bookmarks: bool('bookmarks', false), calendar: bool('calendar', false),
+    desktop: bool('desktop', true), plugins: bool('plugins', false), bookmarks: bool('bookmarks', false), calendar: bool('calendar', false),
     excalidraw: bool('excalidraw', false),
     startup: bool('startup', true), change: bool('change', true),
     debounce: integer('debounce', 5, 1, 3600), interval: integer('interval', 5, 0, 1440),

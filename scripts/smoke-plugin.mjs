@@ -12,6 +12,7 @@ class Element {
   hidden = false;
   addEventListener(name, callback) { this[name] = callback; }
   appendText() {}
+  setText(text) { this.text = text; }
   empty() { this.children = []; }
   addClass(cls) { this.cls = [this.cls, cls].filter(Boolean).join(' '); }
   remove() {
@@ -92,7 +93,7 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
       modalEl = new Element();
       setTitle(title) { this.title = title; }
       open() { modals.push(this); }
-      close() { this.closed = true; }
+      close() { this.closed = true; this.onClose?.(); }
     },
     Notice: class {},
     Plugin: class {
@@ -112,6 +113,7 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
     Setting,
     Platform: { isMobile: mobile, isWin: !mobile, isIosApp: ios },
     getLanguage: () => language,
+    requireApiVersion: () => true,
     setIcon(element, icon) { element.icon = icon; },
     requestUrl() { throw new Error('Unbound plugin must not send network requests'); },
   };
@@ -128,6 +130,7 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
     AbortController,
     TextDecoder,
     TextEncoder,
+    atob, btoa, structuredClone,
   }, { filename: 'dist/main.js' });
   const plugin = new module.exports.default();
   await plugin.onload();
@@ -159,7 +162,9 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   const syncCommand = plugin.commands.find(command => command.id === 'sync-now');
   assert.equal(syncCommand.icon, 'refresh-cw');
   const settingsActions = all.filter(row => row.cls === 'total-sync-button-row');
-  assert.deepEqual(settingsActions.map(row => row.controls.length), [1, 3, 3, 2]);
+  assert.deepEqual(settingsActions.map(row => row.controls.length), mobile ? [1, 3, 3, 2] : [1, 3, 3, 1, 2]);
+  assert.equal(plugin.config.plugins, false);
+  assert.equal(plugin.commands.find(command => command.id === 'plugin-profiles').checkCallback(true), !mobile);
   assert.ok(settingsActions.every(row => row.infoEl.hidden === !row.name));
   assert.deepEqual(settingsActions[2].controls.map(control => control.label), mobile
     ? ['Sync now', 'Show sync plan', 'Resolve conflicts']
@@ -241,6 +246,52 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
 
   plugin.update({ binding: globalThis.crypto.randomUUID(), enabled: true, interval: 0 });
   assert.equal(ribbon.children.length, 1);
+  if (!mobile) {
+    const secrets = new Map([['total-sync-mail-webdav', JSON.stringify({ login: 'fixture@example.com', password: 'synthetic' })]]);
+    mockApp.secretStorage = { getSecret: key => secrets.get(key), setSecret: (key, value) => secrets.set(key, value) };
+    mockApp.vault.configDir = '.obsidian';
+    let scheduled = false, persisted = 0;
+    mockApp.plugins = {
+      plugins: {},
+      async disablePlugin(id) { delete this.plugins[id]; },
+      async enablePluginAndSave(id) { this.plugins[id] = {}; scheduled = true; },
+      async disablePluginAndSave(id) { delete this.plugins[id]; scheduled = true; },
+      async loadManifests() {},
+      async saveConfig() { assert.equal(scheduled, true); scheduled = false; persisted++; },
+    };
+    const service = plugin.pluginProfiles();
+    await service.files.runtime.enable('fixture-plugin', true);
+    assert.equal(scheduled, false, 'enable must await native saveConfig, which is normally scheduled');
+    await service.files.runtime.enable('fixture-plugin', false);
+    assert.equal(persisted, 2);
+    const originalDevices = plugin.pluginDevices;
+    plugin.pluginDevices = async () => [plugin.config.device];
+    const settled = async predicate => {
+      for (let i = 0; i < 1000; i++) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
+      assert.fail('Plugin profile panel did not settle');
+    };
+    plugin.commands.find(command => command.id === 'plugin-profiles').checkCallback(false);
+    await settled(() => modals.at(-1).contentEl.children.some(child => child.cls === 'total-sync-plugin-fingerprint'));
+    const setup = modals.at(-1);
+    assert.ok(setup.contentEl.children.some(row => row.controls?.some(c => c.label === 'Этот ноутбук — исходный')));
+    assert.match(setup.contentEl.children.find(child => child.cls === 'total-sync-plugin-fingerprint').text, /^[a-f0-9]{64}$/);
+    setup.close();
+    const wasConfigured = service.configured;
+    service.configured = () => true;
+    service.rows = [{ id: 'calendar', localVersion: '1.0.0', version: '1.1.0', enabled: true, status: 'pending',
+      localFields: [], localTasks: [], unapproved: [], conflicts: [] }];
+    plugin.commands.find(command => command.id === 'plugin-profiles').checkCallback(false);
+    await settled(() => modals.at(-1).contentEl.children.some(child => child.cls === 'total-sync-plugin-row'));
+    const panel = modals.at(-1);
+    const apply = panel.contentEl.children.flatMap(row => row.controls ?? []).find(c => c.label === 'Применить ожидающие изменения');
+    assert.ok(apply);
+    apply.click();
+    assert.ok(modals.at(-1).contentEl.children.some(child => child.text?.includes('calendar: 1.0.0 → 1.1.0')));
+    modals.at(-1).close(); panel.close();
+    service.configured = wasConfigured;
+    service.rows = [];
+    plugin.pluginDevices = originalDevices;
+  }
   let resolve;
   let controls;
   let calls = 0;

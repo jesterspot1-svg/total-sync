@@ -11,7 +11,8 @@ export type ErrorCode =
   | 'auth' | 'forbidden' | 'missing' | 'rate' | 'server' | 'network' | 'timeout' | 'uncertain'
   | 'dav' | 'protocol' | 'busy' | 'cloud-lock' | 'cloud-unlock' | 'cloud-advanced' | 'cloud-preparing' | 'upload-retry'
   | 'integrity' | 'identity' | 'path' | 'changed'
-  | 'mass-delete' | 'merge-conflict' | 'size' | 'configuration' | 'local' | 'inactive' | 'cancelled';
+  | 'mass-delete' | 'merge-conflict' | 'size' | 'configuration' | 'local' | 'inactive' | 'cancelled'
+  | 'plugin-pending' | 'plugin-trust' | 'plugin-version' | 'plugin-recovery' | 'plugin-key';
 
 export type WritePhase = 'lock-acquire' | 'revision-intent' | 'revision-reserve' | 'revision-index' | 'commit-marker' | 'lock-release';
 
