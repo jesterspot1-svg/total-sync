@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import { Client, DavServer } from './fixture';
 import { DAY, decode, encode, RETENTION, sha256, SyncError } from '../src/model';
-import { RemoteVault } from '../src/repository';
+import { RemoteVault, type LegacyJournal } from '../src/repository';
 import {
   catalogInstallCommand, checkPayload, EXCALIDRAW_ID, EXCALIDRAW_PROFILE, excalidrawPreferences,
   inChannel, jsonBytes, mergePreferences, pathKey, portablePath,
@@ -10,6 +10,11 @@ import {
 import { MAIL, mailEndpoint, ROOT } from '../src/webdav';
 
 const fails = (code: string) => (error: unknown) => error instanceof SyncError && error.code === code;
+
+function publicationJournal(): LegacyJournal {
+  let saved: unknown = null;
+  return { read: () => saved, write: value => { saved = structuredClone(value); } };
+}
 
 async function setup(t: TestContext) {
   const server = await new DavServer().start();
@@ -651,6 +656,92 @@ test('a stored index is verified without another PUT when the gateway lost its r
   assert.ok(readFailed);
   assert.equal(server.requests.filter(row => row.method === 'PUT' && row.path.endsWith(index)).length, 1);
   assert.equal((await remote.head(null)).revision, 1);
+});
+
+test('the originating device resumes a legacy revision left empty by HTTP 504 after restart', async t => {
+  const { b, server, remote, id } = await setup(t);
+  const journal = publicationJournal();
+  const a = new Client(server, id, 'windows', undefined, false, false, undefined, journal);
+  const meta = '/' + ROOT + '/vaults/' + id + '/metadata';
+  const index = meta + '/revisions/1/index.json';
+  const notes = Array.from({ length: 30 }, (_, i) => 'Transfer ' + i + '.md');
+  for (const name of notes) a.local.put(name, name);
+  server.fault = (method, path) => method === 'PUT' && path === index ? { status: 504 } : undefined;
+  await assert.rejects(a.run(), error => error instanceof SyncError && error.phase === 'revision-index' && error.status === 504);
+  assert.ok(server.folders.has(meta + '/revisions/1'));
+  assert.ok(!server.files.has(index));
+  assert.ok(!server.folders.has(meta + '/commits/1'));
+  assert.ok([...server.files.keys()].some(path => path.startsWith(meta + '/lock/intent-')));
+  assert.deepEqual((await b.run()).errors, ['cloud-lock']);
+
+  server.fault = undefined;
+  const restarted = new Client(server, id, 'windows', undefined, false, false, undefined, journal, a.device);
+  for (const name of notes) restarted.local.put(name, name);
+  const start = server.requests.length;
+  const result = await restarted.run();
+  assert.equal(result.recoveredPublication, true);
+  assert.deepEqual(result.errors, []);
+  assert.equal(result.counts.equal, 24);
+  assert.equal(result.counts.push, 6);
+  assert.equal(server.requests.slice(start).filter(row => row.method === 'PUT' && row.path.includes('/content/')).length, 6);
+  assert.equal((await remote.head(null)).revision, 2);
+  assert.ok(!server.folders.has(meta + '/lock'));
+  assert.equal(journal.read(), null);
+  assert.equal((await b.run()).counts.pull, notes.length);
+  for (const name of notes) assert.equal(b.local.text(name), name);
+});
+
+test('a failed intent upload releases the lock before any revision is reserved', async t => {
+  const { server, id, remote } = await setup(t);
+  const journal = publicationJournal();
+  const a = new Client(server, id, 'windows', undefined, false, false, undefined, journal);
+  const meta = '/' + ROOT + '/vaults/' + id + '/metadata';
+  a.local.put('Pending.md', 'synthetic');
+  server.fault = (method, path) => method === 'PUT' && path.startsWith(meta + '/lock/intent-') ? { status: 504 } : undefined;
+  await assert.rejects(a.run(), error => error instanceof SyncError && error.phase === 'revision-intent');
+  assert.ok(!server.folders.has(meta + '/lock'));
+  assert.ok(!server.folders.has(meta + '/revisions/1'));
+  assert.equal(journal.read(), null);
+  server.fault = undefined;
+  assert.equal((await a.run()).counts.push, 1);
+  assert.equal((await remote.head(null)).revision, 1);
+});
+
+test('recovery leaves an unexpected revision index and the lock in place', async t => {
+  const { server, id } = await setup(t);
+  const journal = publicationJournal();
+  const a = new Client(server, id, 'windows', undefined, false, false, undefined, journal);
+  const meta = '/' + ROOT + '/vaults/' + id + '/metadata';
+  const index = meta + '/revisions/1/index.json';
+  a.local.put('Pending.md', 'synthetic');
+  server.fault = (method, path) => method === 'PUT' && path === index ? { status: 504 } : undefined;
+  await assert.rejects(a.run(), fails('uncertain'));
+  server.fault = undefined;
+  const unexpected = encode('unexpected bytes');
+  server.files.set(index, unexpected);
+  const start = server.requests.length;
+  await assert.rejects(a.run(), fails('integrity'));
+  assert.equal(server.files.get(index), unexpected);
+  assert.ok(!server.folders.has(meta + '/commits/1'));
+  assert.ok(server.folders.has(meta + '/lock'));
+  assert.ok(server.requests.slice(start).every(row => ['GET', 'PROPFIND'].includes(row.method)));
+});
+
+test('recovery does not repeat an ambiguous DELETE of the shared legacy lock', async t => {
+  const { server, id, remote } = await setup(t);
+  const journal = publicationJournal();
+  const a = new Client(server, id, 'windows', undefined, false, false, undefined, journal);
+  const lock = '/' + ROOT + '/vaults/' + id + '/metadata/lock';
+  a.local.put('Published.md', 'synthetic');
+  server.fault = (method, path) => method === 'DELETE' && path === lock ? { status: 504 } : undefined;
+  await assert.rejects(a.run(), fails('cloud-unlock'));
+  assert.ok(server.folders.has(lock));
+  server.fault = undefined;
+  const start = server.requests.length;
+  assert.equal((await a.run()).recoveredPublication, undefined);
+  assert.ok(server.folders.has(lock));
+  assert.equal((await remote.head(null)).revision, 1);
+  assert.ok(server.requests.slice(start).every(row => ['GET', 'PROPFIND'].includes(row.method)));
 });
 
 test('an ambiguous lock acquisition reports its phase and preserves the existing lock', async t => {

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.13 · Test prerelease
+
+- Prepare the legacy WebDAV index before reserving its revision number. The originating device can finish its interrupted publication after a timeout or an Obsidian restart, then continue with the remaining files.
+- Verify the saved index and the preceding revision before recovery. Protect unknown locks and conflicting indexes. Record `publication-recovered` in diagnostics after a recovered sync.
+
 ## 0.1.12 · Test prerelease
 
 - Verify cloud metadata after a gateway timeout during legacy publication. Retry a missing write once and keep uncertain lock ownership protected.

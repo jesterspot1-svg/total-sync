@@ -34,6 +34,7 @@ export interface Result {
   merged: number;
   newConflicts: number;
   uploadRetryStatus?: number;
+  recoveredPublication?: boolean;
 }
 
 export type ConflictReview = { path: string; pending: PendingConflict } & (
@@ -145,6 +146,7 @@ export class SyncEngine {
   run(state: SyncState, approval?: string): Promise<Result> {
     return this.exclusive(async () => {
       const check = () => this.active();
+      const recoveredPublication = await this.remote.recoverLegacy(state.checkpoint, check);
       const head = await this.remote.head(state.checkpoint, true, check);
       const preview = await this.inspect(state, head);
       if (preview.plan.requiresApproval && preview.approval !== approval) throw new SyncError('mass-delete');
@@ -184,7 +186,9 @@ export class SyncEngine {
         }
       }
       this.active();
-      return this.apply(state, preview, ops, cloud, errors, readOnly);
+      const result = await this.apply(state, preview, ops, cloud, errors, readOnly);
+      if (recoveredPublication) result.recoveredPublication = true;
+      return result;
     });
   }
 

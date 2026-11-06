@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { DOMParser } from '@xmldom/xmldom';
 import { SyncEngine, type SyncControls } from '../src/engine';
 import { encode, newState, sha256, stamp, SyncError, type Channel, type LocalEntry, type LocalFiles, type Profile, type Scan, type Stamp, type SyncState } from '../src/model';
-import { RemoteVault } from '../src/repository';
+import { RemoteVault, type LegacyJournal } from '../src/repository';
 import { collectionResponse, MAIL, WebDav, type Request } from '../src/webdav';
 
 const auth = 'Basic ' + btoa('tester@example.com:synthetic-fixture');
@@ -210,13 +210,14 @@ export class Client {
   readonly local = new MemoryVault();
   state: SyncState = newState();
   engine: SyncEngine;
-  readonly device = crypto.randomUUID();
+  readonly device: string;
 
   constructor(
     server: DavServer, id: string, profile: Profile = 'windows', maxBytes = 8 * 1024 * 1024,
-    exclusiveMove = false, excalidraw = false, controls?: SyncControls,
+    exclusiveMove = false, excalidraw = false, controls?: SyncControls, journal?: LegacyJournal, device: string = crypto.randomUUID(),
   ) {
-    const remote = new RemoteVault(server.dav(), id, exclusiveMove);
+    this.device = device;
+    const remote = new RemoteVault(server.dav(), id, exclusiveMove, journal);
     this.engine = new SyncEngine(remote, this.local, {
       device: this.device, profile, maxBytes, active: () => true, now: () => server.clock,
       controls,

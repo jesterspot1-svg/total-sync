@@ -14,7 +14,7 @@ export function errorText(code: SyncError['code']): string {
     server: ['Mail returned a server error.', 'Mail вернул ошибку сервера.'],
     network: ['The WebDAV request failed. Check your connection.', 'Запрос WebDAV не удался. Проверьте интернет.'],
     timeout: ['The server took too long to respond.', 'Сервер не успел ответить.'],
-    uncertain: ['A cloud write could not be confirmed. Check the lock recovery instructions.', 'Запись в облако не подтверждена. См. инструкцию по проверке блокировки.'],
+    uncertain: ['A cloud write could not be confirmed. Retry sync on this device. If the error persists, save the diagnostics.', 'Запись в облако не подтверждена. Повторите синхронизацию на этом устройстве. Если ошибка повторится, сохраните диагностику.'],
     dav: ['The WebDAV operation was rejected.', 'WebDAV отклонил операцию.'],
     protocol: ['The WebDAV capability check failed or the server returned an unexpected response.', 'Проверка возможностей WebDAV не прошла или сервер вернул неожиданный ответ.'],
     busy: ['An operation is already running on this device.', 'На этом устройстве уже выполняется операция TotalSync.'],

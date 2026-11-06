@@ -1,5 +1,5 @@
 import {
-  channels, encode, hashPattern, idPattern, sha256, SyncError,
+  channels, encode, hashPattern, idPattern, object, sha256, SyncError,
   type Channel, type Checkpoint, type Manifest, type RemoteFile, type WritePhase,
 } from './model';
 import { emptyManifest, validateManifest } from './manifest';
@@ -10,6 +10,19 @@ export interface Head extends Checkpoint {
   pending?: boolean;
 }
 
+interface LegacyIntent {
+  token: string;
+  revision: number;
+  hash: string;
+  parent: string;
+  releasing: boolean;
+}
+
+export interface LegacyJournal {
+  read(): unknown;
+  write(intent: LegacyIntent | null): void;
+}
+
 function inPhase(error: unknown, phase: WritePhase): unknown {
   return error instanceof SyncError ? new SyncError(error.code, error.status, phase) : error;
 }
@@ -18,7 +31,9 @@ export class RemoteVault {
   private readonly root: string;
   private readonly meta: string;
 
-  constructor(private readonly dav: WebDav, private readonly id: string, private readonly exclusiveMove = false) {
+  constructor(private readonly dav: WebDav, private readonly id: string, private readonly exclusiveMove = false,
+    private readonly journal?: LegacyJournal,
+  ) {
     if (!idPattern.test(id)) throw new SyncError('identity');
     this.root = ROOT + '/vaults/' + id;
     this.meta = this.root + '/metadata';
@@ -104,14 +119,18 @@ export class RemoteVault {
     const lockPath = this.meta + '/lock';
     if (!await this.dav.collection(this.meta)) throw new SyncError('missing');
     if (!await this.createOwnedCollection(lockPath, 'lock-acquire')) throw new SyncError('cloud-lock');
-    let uncertain = false;
+    let preserve = false;
     try {
+      if (this.pendingIntent()) this.journal?.write(null);
       return await action();
     } catch (error) {
-      uncertain = error instanceof SyncError && error.code === 'uncertain';
+      // Intent write failures and confirmed reservation collisions precede any write to our revision.
+      const beforeReservation = error instanceof SyncError
+        && (error.phase === 'revision-intent' || error.code === 'cloud-advanced');
+      preserve = !beforeReservation && (!!this.pendingIntent() || (error instanceof SyncError && error.code === 'uncertain'));
       throw error;
     } finally {
-      if (!uncertain) await this.releaseLock(lockPath);
+      if (!preserve) await this.releaseLock(lockPath);
     }
   }
 
@@ -146,18 +165,79 @@ export class RemoteVault {
   }
 
   private async releaseLock(path: string): Promise<void> {
+    const intent = this.pendingIntent();
+    if (intent) this.journal?.write({ ...intent, releasing: true });
     try {
       await this.dav.remove(path);
     } catch (error) {
       const status = error instanceof SyncError ? error.status : undefined;
       // The reply can be lost after DELETE. Read the result without issuing another DELETE.
+      let absent = false;
       try {
-        if (!await this.dav.collection(path)) return;
+        absent = !await this.dav.collection(path);
       } catch {
         // The lock's disappearance could not be confirmed.
       }
-      throw new SyncError('cloud-unlock', status, 'lock-release');
+      if (!absent) throw new SyncError('cloud-unlock', status, 'lock-release');
     }
+    if (intent) this.journal?.write(null);
+  }
+
+  private pendingIntent(): LegacyIntent | undefined {
+    const intent = this.journal?.read();
+    if (!object(intent) || typeof intent.token !== 'string' || !idPattern.test(intent.token)
+      || typeof intent.revision !== 'number' || !Number.isSafeInteger(intent.revision) || intent.revision < 1
+      || typeof intent.hash !== 'string' || !hashPattern.test(intent.hash)
+      || typeof intent.parent !== 'string' || !hashPattern.test(intent.parent) || typeof intent.releasing !== 'boolean') return undefined;
+    return { token: intent.token, revision: intent.revision, hash: intent.hash, parent: intent.parent, releasing: intent.releasing };
+  }
+
+  private intentPath(intent: LegacyIntent): string {
+    return this.meta + '/lock/intent-' + intent.token + '.json';
+  }
+
+  async recoverLegacy(known: Checkpoint | null, check: () => void): Promise<boolean> {
+    const intent = this.pendingIntent();
+    if (!intent) return false;
+    check();
+    const lock = this.meta + '/lock';
+    if (!await this.dav.collection(lock)) {
+      this.journal?.write(null);
+      return false;
+    }
+    // Never repeat a DELETE that may still take effect on the shared lock path.
+    if (intent.releasing) return false;
+    const bytes = await this.storedIndex(this.intentPath(intent));
+    if (!bytes) return false;
+    const manifest = validateManifest(bytes, this.id);
+    if (await sha256(bytes) !== intent.hash || manifest.parent !== intent.parent || manifest.revision !== intent.revision) {
+      throw new SyncError('integrity', undefined, 'revision-intent');
+    }
+
+    const latest = await this.head(known, true, check);
+    if (latest.revision >= intent.revision) {
+      if (latest.revision > intent.revision && !await this.committed(intent.revision)) throw new SyncError('integrity');
+      const published = latest.revision === intent.revision ? latest : await this.read(intent.revision);
+      if (published.hash !== intent.hash) throw new SyncError('integrity', undefined, 'revision-index');
+    } else {
+      if (latest.revision !== intent.revision - 1 || latest.hash !== intent.parent) throw new SyncError('integrity');
+      check();
+      if (!latest.pending && !await this.createOwnedCollection(this.reservation(intent.revision), 'revision-reserve')) {
+        throw new SyncError('cloud-advanced');
+      }
+      const path = this.revisionPath(intent.revision);
+      const saved = await this.storedIndex(path);
+      if (saved && await sha256(saved) !== intent.hash) throw new SyncError('integrity', undefined, 'revision-index');
+      if (!saved) {
+        if (latest.pending && await this.storedIndex(this.reservation(intent.revision) + '/ready')) {
+          throw new SyncError('cloud-preparing');
+        }
+        await this.storeIndex(path, bytes, intent.hash);
+      }
+      if (!await this.committed(intent.revision)) await this.publishMarker(intent.revision, intent.hash);
+    }
+    await this.releaseLock(lock);
+    return true;
   }
 
   private committed(revision: number): Promise<boolean> {
@@ -235,6 +315,12 @@ export class RemoteVault {
     validateManifest(bytes, this.id);
     const hash = await sha256(bytes);
     if (previous && this.exclusiveMove) return this.publishPrepared(previous, bytes, hash);
+    if (previous && this.journal) {
+      // Save the exact bytes under an unguessable path in the acquired lock before reserving the number.
+      const intent = { token: crypto.randomUUID(), revision, hash, parent: previous.hash, releasing: false };
+      this.journal.write(intent);
+      await this.storeIndex(this.intentPath(intent), bytes, hash, 'revision-intent', false);
+    }
     const path = this.revisionPath(revision);
     if (await this.committed(revision) || !await this.createOwnedCollection(this.reservation(revision), 'revision-reserve')) {
       throw new SyncError(previous ? 'cloud-advanced' : 'integrity');
@@ -260,20 +346,21 @@ export class RemoteVault {
     }
   }
 
-  private async storeIndex(path: string, bytes: ArrayBuffer, hash: string): Promise<void> {
+  private async storeIndex(path: string, bytes: ArrayBuffer, hash: string, phase: WritePhase = 'revision-index', readback = true): Promise<void> {
     let failure: SyncError | undefined;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         await this.dav.put(path, bytes);
+        if (!readback) return;
       } catch (error) {
-        if (!(error instanceof SyncError) || error.code !== 'uncertain') throw failure ?? inPhase(error, 'revision-index');
-        failure = new SyncError('uncertain', error.status, 'revision-index');
+        if (!(error instanceof SyncError) || error.code !== 'uncertain') throw failure ?? inPhase(error, phase);
+        failure = new SyncError('uncertain', error.status, phase);
       }
       let saved: ArrayBuffer | undefined;
       try {
         saved = await this.storedIndex(path);
       } catch (error) {
-        throw failure ?? new SyncError('uncertain', error instanceof SyncError ? error.status : undefined, 'revision-index');
+        throw failure ?? new SyncError('uncertain', error instanceof SyncError ? error.status : undefined, phase);
       }
       if (saved) {
         if (await sha256(saved) === hash) return;
@@ -281,7 +368,7 @@ export class RemoteVault {
       }
       // Repeat the same bytes only when readback confirms the owned path is empty.
     }
-    throw failure ?? new SyncError('uncertain', undefined, 'revision-index');
+    throw failure ?? new SyncError('uncertain', undefined, phase);
   }
 
   private async publishMarker(revision: number, hash: string): Promise<void> {

@@ -13,7 +13,7 @@ export type ErrorCode =
   | 'integrity' | 'identity' | 'path' | 'changed'
   | 'mass-delete' | 'merge-conflict' | 'size' | 'configuration' | 'local' | 'inactive' | 'cancelled';
 
-export type WritePhase = 'lock-acquire' | 'revision-reserve' | 'revision-index' | 'commit-marker' | 'lock-release';
+export type WritePhase = 'lock-acquire' | 'revision-intent' | 'revision-reserve' | 'revision-index' | 'commit-marker' | 'lock-release';
 
 export class SyncError extends Error {
   constructor(readonly code: ErrorCode, readonly status?: number, readonly phase?: WritePhase) {

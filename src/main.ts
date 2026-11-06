@@ -300,8 +300,10 @@ export default class TotalSync extends Plugin {
     }, delay);
   }
 
-  private retryAfterFailure(code: SyncError['code']): void {
-    if (!['network', 'timeout', 'cloud-lock', 'cloud-advanced', 'cloud-preparing', 'upload-retry', 'rate', 'server'].includes(code)) return;
+  private retryAfterFailure(code: SyncError['code'], phase?: SyncError['phase']): void {
+    const recoverablePublication = code === 'uncertain'
+      && (phase === 'revision-intent' || phase === 'revision-reserve' || phase === 'revision-index' || phase === 'commit-marker');
+    if (!recoverablePublication && !['network', 'timeout', 'cloud-lock', 'cloud-advanced', 'cloud-preparing', 'upload-retry', 'rate', 'server'].includes(code)) return;
     const delay = Math.min(300, this.config.retry * 2 ** Math.min(8, this.retryCount++));
     this.scheduleRetry((delay + Math.random()) * 1000);
   }
@@ -315,7 +317,11 @@ export default class TotalSync extends Plugin {
     if (!this.config.binding || this.stateError) throw new SyncError(this.stateError ? 'integrity' : 'identity');
     const credential = this.credentials();
     if (!credential) throw new SyncError('configuration');
-    const remote = new RemoteVault(this.dav(MAIL, credential), this.config.binding, this.config.exclusiveMove);
+    const key = 'total-sync-publication-v1-' + this.config.binding + '-' + this.config.device;
+    const remote = new RemoteVault(this.dav(MAIL, credential), this.config.binding, this.config.exclusiveMove, {
+      read: () => this.app.loadLocalStorage(key) as unknown,
+      write: intent => this.app.saveLocalStorage(key, intent),
+    });
     return new SyncEngine(remote, files, {
       device: this.config.device, profile: this.profile, maxBytes: this.maxBytes,
       active: () => !this.stopped && !this.suspended,
@@ -428,6 +434,7 @@ export default class TotalSync extends Plugin {
       this.devices = result.devices;
       if (complete) this.retryCount = 0;
       const n = result.counts;
+      if (result.recoveredPublication) this.record('publication-recovered');
       this.record('sync push=' + n.push + ' pull=' + n.pull + ' deleted=' + (n['delete-local'] + n['delete-remote'])
         + ' conflicts=' + n.conflict + ' review=' + n.review + ' merged=' + result.merged
         + ' blocked=' + n.blocked + ' checked=' + (n.equal + n.push + n.pull + n.conflict + n.review));
@@ -441,7 +448,7 @@ export default class TotalSync extends Plugin {
       if (result.desktopChanged) new Notice(t('Desktop settings changed. Close and reopen the vault to apply them.', 'Настройки Windows изменились. Закройте и заново откройте хранилище для их применения.'));
       return {
         error: complete ? null : this.currentError,
-        changed: n.push + n.pull + n['delete-local'] + n['delete-remote'] + n.conflict > 0,
+        changed: result.recoveredPublication || n.push + n.pull + n['delete-local'] + n['delete-remote'] + n.conflict > 0,
       };
     }, false, true).finally(() => { this.syncController = undefined; });
     if (this.stopped) return;
@@ -482,7 +489,7 @@ export default class TotalSync extends Plugin {
       this.currentError = failure.code;
       this.record(failure.code, failure.status, failure.phase);
       if (notify) new Notice(errorText(failure.code));
-      if (retry && !this.syncController?.signal.aborted) this.retryAfterFailure(failure.code);
+      if (retry && !this.syncController?.signal.aborted) this.retryAfterFailure(failure.code, failure.phase);
       return undefined;
     } finally {
       this.working = false;
