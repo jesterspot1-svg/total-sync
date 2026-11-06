@@ -57,7 +57,7 @@ class Setting {
   addTextArea(init) { return this.add(init); }
 }
 
-for (const [language, mobile] of [['ru', false], ['fr', true]]) {
+for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr', true, false, 32], ['fr', true, true, Infinity]]) {
   const stored = new Map();
   const claims = new Map();
   const body = new Element();
@@ -110,7 +110,7 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
     },
     PluginSettingTab: class { containerEl = new Element(); },
     Setting,
-    Platform: { isMobile: mobile, isWin: !mobile },
+    Platform: { isMobile: mobile, isWin: !mobile, isIosApp: ios },
     getLanguage: () => language,
     setIcon(element, icon) { element.icon = icon; },
     requestUrl() { throw new Error('Unbound plugin must not send network requests'); },
@@ -149,6 +149,9 @@ for (const [language, mobile] of [['ru', false], ['fr', true]]) {
   assert.ok(labels.includes(mobile ? 'Mail WebDAV connection' : 'Подключение к WebDAV Mail'));
   assert.equal(labels.includes('Настройки Windows'), !mobile);
   assert.equal(labels.includes('Windows settings'), false);
+  const attachments = all.find(row => row.name === (mobile ? 'Attachments' : 'Вложения'));
+  assert.equal(plugin.maxBytes, maxMiB * 1024 * 1024);
+  assert.ok(attachments.description.includes(ios ? 'does not cap file size' : String(maxMiB)));
   const password = all.find(row => row.name === (mobile ? 'App password' : 'Пароль приложения'));
   assert.equal(password.controls[0].inputEl.type, 'password');
   assert.equal(plugin.config.enabled, false);

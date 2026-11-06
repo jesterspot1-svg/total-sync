@@ -27,7 +27,7 @@ const request: Transport = async ({ url, method, headers, body }) => {
 export default class TotalSync extends Plugin {
   config!: Options;
   readonly profile: Profile = Platform.isMobile ? 'mobile' : Platform.isWin ? 'windows' : 'desktop';
-  readonly maxBytes = (Platform.isMobile ? 32 : 128) * 1024 * 1024;
+  readonly maxBytes = Platform.isIosApp ? Infinity : (Platform.isMobile ? 32 : 128) * 1024 * 1024;
   devices: Manifest['devices'] = {};
   private lastSuccess: number | null = null;
   working = false;

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.14 · Test prerelease
+
+- Remove the TotalSync file-size cap for uploads and downloads on iOS. Update the attachments setting to describe the iOS policy.
+
 ## 0.1.13 · Test prerelease
 
 - Prepare the legacy WebDAV index before reserving its revision number. The originating device can finish its interrupted publication after a timeout or an Obsidian restart, then continue with the remaining files.

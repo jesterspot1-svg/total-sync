@@ -458,6 +458,28 @@ test('over-limit attachment does not prevent other notes and media from syncing'
   assert.equal(constrained.local.group('content').has('01.mp4'), false);
 });
 
+test('an uncapped iOS client downloads and uploads files over the former 32 MiB limit', async t => {
+  const { server, id } = await setup(t);
+  const desktop = new Client(server, id, 'windows', 128 * 1024 * 1024);
+  const ios = new Client(server, id, 'mobile', Infinity);
+  const presentation = new Uint8Array(62.25 * 1024 * 1024).fill(62).buffer;
+  desktop.local.put('Presentation.pptx', presentation);
+  assert.equal((await desktop.run()).counts.push, 1);
+
+  const download = await ios.run();
+  assert.deepEqual(download.errors, []);
+  assert.equal(download.counts.pull, 1);
+  assert.deepEqual(ios.local.group('content').get('Presentation.pptx'), presentation);
+
+  const video = new Uint8Array(33 * 1024 * 1024).fill(33).buffer;
+  ios.local.put('Video.mp4', video);
+  const upload = await ios.run();
+  assert.deepEqual(upload.errors, []);
+  assert.equal(upload.counts.push, 1);
+  assert.equal((await desktop.run()).counts.pull, 1);
+  assert.deepEqual(desktop.local.group('content').get('Video.mp4'), video);
+});
+
 test('same-client overlap is rejected and committed state survives restart', async t => {
   const { a, b } = await setup(t);
   a.local.put('Saved.md', 'once');

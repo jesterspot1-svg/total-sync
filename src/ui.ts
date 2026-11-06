@@ -410,8 +410,10 @@ export class SettingsTab extends PluginSettingTab {
     new Setting(el).setName(t('Data channels', 'Области данных')).setHeading();
     this.toggle('content', 'Content', 'Контент', ['Notes and folders.', 'Заметки и папки.']);
     this.toggle('attachments', 'Attachments', 'Вложения',
-      ['One file at a time. Device limit: ' + plugin.maxBytes / 1024 / 1024 + ' MiB.',
-        'По одному файлу. Лимит на устройстве — ' + plugin.maxBytes / 1024 / 1024 + ' МиБ.']);
+      Number.isFinite(plugin.maxBytes)
+        ? ['One file at a time. Device limit: ' + plugin.maxBytes / 1024 / 1024 + ' MiB.',
+          'По одному файлу. Лимит на устройстве — ' + plugin.maxBytes / 1024 / 1024 + ' МиБ.']
+        : ['TotalSync does not cap file size on iOS.', 'На iOS у TotalSync нет лимита размера файла.']);
     this.toggle('bookmarks', 'Bookmarks snapshots', 'Снимки закладок',
       ['Publish and export snapshots through the command palette.', 'Публикация и экспорт снимков через палитру команд.']);
     if (plugin.profile === 'windows') {
