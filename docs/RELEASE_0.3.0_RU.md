@@ -24,7 +24,9 @@
 
 [Стабильный релиз 0.3.0](https://github.com/jesterspot1-svg/total-sync/releases/tag/0.3.0) опубликован 7 ноября 2026 года из коммита `c0c54f869c868fe1ec24d7cc3d2b5d307cadfe85`. [CI Windows/Linux](https://github.com/jesterspot1-svg/total-sync/actions/runs/42367295206) и [сборка тега](https://github.com/jesterspot1-svg/total-sync/actions/runs/42367298357) завершились успешно. Файлы `main.js`, `manifest.json`, `styles.css` получены из CI, побайтово совпадают с локальной и установленной сборкой; `SHA256SUMS.txt` приложен к релизу. Проверены также контрольная сумма архива CI и digest каждого опубликованного файла.
 
-README и краткое описание manifest опубликованы вместе с релизом. Отдельный текст About для веб-каталога подготовлен в [COMMUNITY_LISTING_0.3.0.md](COMMUNITY_LISTING_0.3.0.md); его сохранение в Community требует отдельного подтверждения результата на публичной странице.
+Короткое описание, About и упрощённый Overview проверены на [публичной карточке Community](https://community.obsidian.md/plugins/total-sync). Точный текст сохранён в [COMMUNITY_LISTING_0.3.0.md](COMMUNITY_LISTING_0.3.0.md).
+
+Проверка версии 0.3.0 в Community завершилась со статусом Completed. Obsidian воспроизвёл файл `main.js` побайтово. Публичная карточка показывает версию 0.3.0 и оценку Review Satisfactory.
 
 ## Проверка пользователем
 
