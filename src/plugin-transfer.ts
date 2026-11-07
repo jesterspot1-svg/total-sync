@@ -1,4 +1,4 @@
-import { encode, hashPattern, idPattern, parse, sha256, SyncError } from './model';
+import { encode, hashPattern, idPattern, object, parse, sha256, SyncError } from './model';
 import { ROOT, type WebDav } from './webdav';
 import { canonical, encodeHead, verifyHead, type BlobRef, type SignedHead, type VerifiedHead } from './plugin-profile';
 
@@ -22,12 +22,12 @@ export class PluginTransfer {
   }
   async publish(device: string, envelope: SignedHead): Promise<void> {
     const bytes = encodeHead(envelope);
-    await verifyHead(bytes, this.vault, device);
+    const verified = await verifyHead(bytes, this.vault, device);
+    const expectedHash = await sha256(bytes);
     this.check();
     await this.dav.mkdir(this.root);
     await this.dav.mkdir(this.root + '/history');
     await this.dav.mkdir(this.root + '/history/' + device);
-    const verified = await verifyHead(bytes, this.vault, device);
     const historyPath = this.root + '/history/' + device + '/' + verified.data.seq + '.json';
     let old: VerifiedHead | undefined;
     try {
@@ -41,16 +41,17 @@ export class PluginTransfer {
     if (!old) {
       try { await this.dav.put(historyPath, bytes); }
       catch (error) { if (!(error instanceof SyncError) || error.code !== 'uncertain') throw error; }
-      if (await sha256(await this.dav.get(historyPath)) !== await sha256(bytes)) throw new SyncError('integrity');
+      if (await sha256(await this.dav.get(historyPath)) !== expectedHash) throw new SyncError('integrity');
     }
     // Each device owns a different head. No shared collection lock or numbered revision is needed.
     const path = this.root + '/' + device + '.json';
     try { await this.dav.put(path, bytes); }
     catch (error) {
       if (!(error instanceof SyncError) || error.code !== 'uncertain') throw error;
-      if (await sha256(await this.dav.get(path)) !== await sha256(bytes)) throw error;
+      if (await sha256(await this.dav.get(path)) !== expectedHash) throw error;
+      return;
     }
-    if (await sha256(await this.dav.get(path)) !== await sha256(bytes)) throw new SyncError('integrity');
+    if (await sha256(await this.dav.get(path)) !== expectedHash) throw new SyncError('integrity');
   }
   async blob(ref: BlobRef): Promise<ArrayBuffer> {
     if (!hashPattern.test(ref.hash)) throw new SyncError('integrity');
@@ -89,7 +90,7 @@ export class PluginCatalog {
       const rows: unknown = parse(bytes);
       if (!Array.isArray(rows)) throw new SyncError('protocol');
       this.registry = new Map();
-      for (const row of rows) if (row && typeof row.id === 'string' && typeof row.repo === 'string'
+      for (const row of rows) if (object(row) && typeof row.id === 'string' && typeof row.repo === 'string'
         && /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(row.repo)) this.registry.set(row.id, row.repo);
     }
     return this.registry.get(id);

@@ -19,8 +19,8 @@ export class SyncFeedback {
     });
     this.badge = this.container.createDiv({ cls: 'total-sync-feedback-badge' });
     this.badge.hidden = true;
-    this.icon = this.badge.createEl('span', { cls: 'total-sync-feedback-icon', attr: { 'aria-hidden': 'true' } });
-    this.label = this.badge.createEl('span', { cls: 'total-sync-feedback-label' });
+    this.icon = this.badge.createSpan({ cls: 'total-sync-feedback-icon', attr: { 'aria-hidden': 'true' } });
+    this.label = this.badge.createSpan({ cls: 'total-sync-feedback-label' });
     this.stopButton = this.badge.createEl('button', {
       cls: 'total-sync-feedback-stop', attr: { type: 'button' }, text: t('Stop', 'Остановить'),
     });

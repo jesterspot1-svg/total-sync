@@ -112,7 +112,7 @@ export async function loadSigningKey(storage: SigningKeyStorage, vault: string, 
   } catch { throw new SyncError('plugin-secret'); }
 }
 export async function signHead(data: PluginHead, privateKey: string): Promise<SignedHead> {
-  const jwk: JsonWebKey = JSON.parse(privateKey);
+  const jwk = JSON.parse(privateKey) as JsonWebKey;
   const key = await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
   const publicKey = canonical({ kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y });
   const body = canonical(data);
@@ -144,7 +144,7 @@ export function candidates(heads: VerifiedHead[]): Record<string, Candidate[]> {
   for (const [path, values] of Object.entries(result)) {
     result[path] = values.filter(a => !values.some(b => a !== b
       && (b.device === a.device ? b.edit.seq > a.edit.seq : (b.edit.seen[a.device] ?? 0) >= a.edit.seq)));
-    if (!result[path]!.length) throw new SyncError('integrity');
+    if (!result[path].length) throw new SyncError('integrity');
   }
   return result;
 }

@@ -34,6 +34,7 @@ export async function showPluginProfiles(plugin: TotalSync): Promise<void> {
   const enteredFingerprints = new Map<string, string>();
   const act = async (action: () => Promise<void>) => {
     if (running) return;
+    if (plugin.working) { error = errorText('busy'); render(); return; }
     running = true;
     error = '';
     render();

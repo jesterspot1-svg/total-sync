@@ -41,6 +41,7 @@ export function portableValue(value: unknown, depth = 0): value is Preference {
   if (value === null || typeof value === 'boolean') return true;
   if (typeof value === 'number') return Number.isFinite(value);
   if (typeof value === 'string') return value.length <= 100_000
+    // eslint-disable-next-line no-control-regex -- Reject hidden control bytes in exported settings; tabs and newlines remain valid.
     && !/^[a-z]:[\\/]|^\\\\|^\/(?:Users|home|mnt|Volumes|usr|opt)\/|^file:|[\u0000-\u0008]/i.test(value)
     && !/https?:\/\/[^/\s]+@|(?:api[_-]?key|access[_-]?token|password|secret)\s*[=:]|(?:^|[/\\])\.\.(?:[/\\]|$)/i.test(value);
   if (Array.isArray(value)) return value.length <= 5000 && value.every(item => portableValue(item, depth + 1));

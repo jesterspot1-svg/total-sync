@@ -113,7 +113,7 @@ function appendBoth(base: string[], start: number, end: number, local: string[],
   const logicalEnd = base[base.length - 1] === '' ? base.length - 1 : base.length;
   if (start !== logicalEnd || end > base.length || !local.some(Boolean) || !remote.some(Boolean)) return undefined;
   // Combining two insertions at one location is only safe for plain text at the end.
-  const plain = (line: string) => line === '' || (/^[\p{L}\p{N}][^\[\]{}<>|`]*$/u.test(line) && !/^\d+[.)](?:\s|$)/.test(line));
+  const plain = (line: string) => line === '' || (/^[\p{L}\p{N}][^[\]{}<>|`]*$/u.test(line) && !/^\d+[.)](?:\s|$)/.test(line));
   if (![...base, ...local, ...remote].every(plain)) return undefined;
   if (isSubsequence(local, remote)) return remote;
   if (isSubsequence(remote, local)) return local;

@@ -17,6 +17,7 @@ const config = '.custom-config';
 const missing = () => new SyncError('missing', 404);
 
 class Disk implements PluginDisk {
+  reads: string[] = [];
   data = new Map<string, ArrayBuffer>();
   folders = new Set<string>();
   mtimes = new Map<string, number>();
@@ -32,7 +33,7 @@ class Disk implements PluginDisk {
     const direct = (p: string) => p.startsWith(path + '/') && !p.slice(path.length + 1).includes('/');
     return { files: [...this.data.keys()].filter(direct), folders: [...this.folders].filter(direct) };
   }
-  async readBinary(path: string) { const value = this.data.get(path); if (!value) throw missing(); return value.slice(0); }
+  async readBinary(path: string) { this.reads.push(path); const value = this.data.get(path); if (!value) throw missing(); return value.slice(0); }
   async writeBinary(path: string, bytes: ArrayBuffer) {
     if (this.failWrite?.(path)) throw new SyncError('local');
     if (!this.folders.has(path.slice(0, path.lastIndexOf('/')))) throw new Error('Missing parent: ' + path);
@@ -153,6 +154,37 @@ test('Outliner 4.10.2 settings use persisted keys and keep release bookkeeping l
   assert.deepEqual(preferences('obsidian-outliner', { ...values, previousRelease: '4.10.2', token: 'synthetic' }), values);
   assert.deepEqual(preferences('obsidian-outliner', { drawVerticalLines: true, improveStyleOfLists: false }),
     { drawVerticalLines: true, improveStyleOfLists: false });
+});
+
+test('applying one plugin verifies its transaction without rereading unrelated packages', async () => {
+  const local = await client(a, new Cloud());
+  await install(local);
+  await install(local, 'obsidian-outliner', '4.10.2', { listLines: false });
+  const expected = (await local.files.scan()).find(p => p.id === 'calendar')!;
+  local.disk.reads.length = 0;
+  await local.files.apply('calendar', expected, expected.pkg, new Map(), { wordsPerDot: 300 }, true);
+  assert.equal((await local.files.rawSettings('calendar')).wordsPerDot, 300);
+  assert.equal(local.disk.reads.filter(path => path.startsWith(config + '/plugins/obsidian-outliner/')).length, 0);
+  assert.ok(local.disk.reads.includes(config + '/plugins/calendar/main.js'));
+  assert.equal(await local.files.interrupted(), false);
+});
+
+test('a formatted manifest is read once per scan and force scans still observe changed package bytes', async () => {
+  const local = await client(a, new Cloud());
+  await install(local);
+  const manifest = config + '/plugins/calendar/manifest.json';
+  await local.disk.writeBinary(manifest, encode(JSON.stringify(await local.files.read(manifest), null, 2)));
+  const first = (await local.files.scan())[0]!;
+  local.disk.reads.length = 0;
+  const second = (await local.files.scan())[0]!;
+  assert.deepEqual(second.pkg, first.pkg);
+  assert.equal(local.disk.reads.filter(path => path === manifest).length, 1);
+  assert.equal(local.disk.reads.filter(path => path.endsWith('/main.js')).length, 0);
+  const main = config + '/plugins/calendar/main.js';
+  const bytes = new Uint8Array(await local.disk.readBinary(main));
+  bytes[0] = bytes[0]! ^ 1;
+  local.disk.data.set(main, bytes.buffer);
+  assert.notEqual((await local.files.scan(true))[0]!.pkg.files['main.js']!.hash, first.pkg.files['main.js']!.hash);
 });
 
 test('identical existing Outliner installations exchange a new toggle in both directions', async () => {

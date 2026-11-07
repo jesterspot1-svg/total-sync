@@ -87,7 +87,8 @@ export class WebDav {
     const mutates = method !== 'GET' && method !== 'PROPFIND';
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new SyncError(mutates ? 'uncertain' : 'timeout')), this.timeout);
+      // Use the current host's timer API: a window in Obsidian and Node in the HTTP fixture.
+      timer = globalThis.setTimeout(() => reject(new SyncError(mutates ? 'uncertain' : 'timeout')), this.timeout);
     });
     try {
       const result = await Promise.race([
@@ -101,7 +102,7 @@ export class WebDav {
       if (error instanceof SyncError) throw error;
       throw new SyncError(mutates ? 'uncertain' : 'network');
     } finally {
-      clearTimeout(timer);
+      globalThis.clearTimeout(timer);
     }
   }
 

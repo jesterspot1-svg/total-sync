@@ -198,10 +198,15 @@ export class SyncEngine {
   ): Promise<void> {
     this.active();
     const expected = work.head;
+    // Verify ordinary file uploads before taking the shared metadata lock. Slow uploads
+    // and failed connections must not block other devices from publishing their changes.
+    if (!staged && await this.remote.writesLocked()) throw new SyncError('cloud-lock');
+    const prepared = staged ?? await this.stageUploads(ops, now, work, errors);
+    this.active();
     await this.remote.write(async () => {
       const current = await this.remote.headForWrite(expected, () => this.active());
       if (current.hash !== expected.hash) throw new SyncError('cloud-advanced');
-      work.head = await this.commit(current, preview, ops, work, errors, now, staged);
+      work.head = await this.commit(current, preview, ops, work, errors, now, prepared);
     });
   }
 
@@ -325,7 +330,7 @@ export class SyncEngine {
     return this.remote.upload('content', bytes, hash, this.options.device, now);
   }
 
-  private async stageSmallUploads(deferred: Operation[], now: number, work: CloudWork, errors: Result['errors']) {
+  private async stageUploads(deferred: Operation[], now: number, work: CloudWork, errors: Result['errors']) {
     const { failed, transferred } = work;
     const files = deferred.filter(op => op.action === 'push' && op.local?.kind === 'file' && op.local.size <= smallFile);
     const staged = new Map<Operation, RemoteFile>();
@@ -336,6 +341,16 @@ export class SyncEngine {
         const op = batch[index]!;
         if (result.status === 'fulfilled') staged.set(op, result.value);
         else this.fileFailure(result.reason, op, failed, errors);
+      }
+    }
+    // Keep large files sequential so preparation does not multiply peak memory use.
+    for (const op of deferred) {
+      if (op.action !== 'push' || op.local?.kind !== 'file' || op.local.size <= smallFile) continue;
+      this.active();
+      try {
+        staged.set(op, await this.upload(op, now, transferred));
+      } catch (error) {
+        this.fileFailure(error, op, failed, errors);
       }
     }
     return staged;
@@ -400,7 +415,7 @@ export class SyncEngine {
 
   private async commit(
     head: Head, preview: Inspection, deferred: Operation[], work: CloudWork, errors: Result['errors'], now: number,
-    prepared?: ReadonlyMap<Operation, RemoteFile>,
+    prepared: ReadonlyMap<Operation, RemoteFile>,
   ): Promise<Head> {
     const manifest = head.manifest;
     const { failed, conflicts, unsafeDelete } = work;
@@ -409,7 +424,6 @@ export class SyncEngine {
     for (const path of preview.scans.get('content')?.entries.keys() ?? []) aliases.set(pathKey(path), path);
     let dirty = manifest.devices[this.options.device] !== this.options.profile;
     manifest.devices[this.options.device] = this.options.profile;
-    const staged = prepared ?? await this.stageSmallUploads(deferred, now, work, errors);
 
     for (const op of deferred) {
       this.active();
@@ -457,8 +471,9 @@ export class SyncEngine {
         }
         if (!op.local) continue;
         if (op.local.kind === 'folder') await this.local.verify(op.channel, op.path, 'folder');
-        const next: RemoteEntry = op.local.kind === 'folder'
-          ? { kind: 'folder', at: now, device: this.options.device } : staged.get(op) ?? await this.upload(op, now, work.transferred);
+        const next: RemoteEntry | undefined = op.local.kind === 'folder'
+          ? { kind: 'folder', at: now, device: this.options.device } : prepared.get(op);
+        if (!next) throw new SyncError('integrity');
         if (op.channel === 'content') this.addParents(manifest, op.path, preview.scans.get('content'), now);
         if (op.remote?.kind === 'file') this.archive(manifest, op, op.remote, 'updated', now);
         group[op.path] = next;

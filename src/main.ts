@@ -48,6 +48,7 @@ export default class TotalSync extends Plugin {
   private debounceTimer?: Timer;
   private periodicTimer?: Timer;
   private retryTimer?: Timer;
+  private retryAt = 0;
   private retryCount = 0;
   private changedWhileWorking = false;
   private feedback?: SyncFeedback;
@@ -62,7 +63,7 @@ export default class TotalSync extends Plugin {
   private pluginWatchStamp = '';
 
   async onload(): Promise<void> {
-    this.suspended = Platform.isMobile && document.hidden;
+    this.suspended = Platform.isMobile && activeDocument.hidden;
     try {
       this.config = options(this.app.loadLocalStorage(storageKey));
       this.app.saveLocalStorage(storageKey, this.config);
@@ -126,14 +127,14 @@ export default class TotalSync extends Plugin {
     this.registerEvent(this.app.vault.on('delete', changed));
     this.registerEvent(this.app.vault.on('rename', changed));
     this.registerDomEvent(window, 'online', () => this.scheduleRetry(1000));
-    this.registerDomEvent(document, 'visibilitychange', () => {
-      this.suspended = Platform.isMobile && document.hidden;
+    this.registerDomEvent(activeDocument, 'visibilitychange', () => {
+      this.suspended = Platform.isMobile && activeDocument.hidden;
       this.refreshStatus();
       if (Platform.isMobile && !this.suspended) this.scheduleRetry(1000);
     });
     this.app.workspace.onLayoutReady(() => {
       if (this.stopped) return;
-      this.feedback = new SyncFeedback(document.body, Platform.isMobile, () => this.stopSync());
+      this.feedback = new SyncFeedback(activeDocument.body, Platform.isMobile, () => this.stopSync());
       if (!Platform.isMobile) {
         this.statusItem = this.addStatusBarItem();
         this.statusItem.addClass('total-sync-last-sync');
@@ -160,9 +161,10 @@ export default class TotalSync extends Plugin {
 
   private claim(binding: string): void {
     const key = 'total-sync-claim-' + binding;
-    const existing = localStorage.getItem(key);
+    // This guard must span vaults in the same app; vault-scoped App storage would miss duplicate bindings.
+    const existing = window.localStorage.getItem(key);
     if (existing && existing !== this.config.device) throw new SyncError('identity');
-    localStorage.setItem(key, this.config.device);
+    window.localStorage.setItem(key, this.config.device);
   }
 
   credentials(): Credential | null {
@@ -208,7 +210,8 @@ export default class TotalSync extends Plugin {
     await this.operate(async () => {
       if (this.config.binding || this.stateError || !idPattern.test(binding)) throw new SyncError('identity');
       const claimKey = 'total-sync-claim-' + binding;
-      if (localStorage.getItem(claimKey) && localStorage.getItem(claimKey) !== this.config.device) throw new SyncError('identity');
+      const existingClaim = window.localStorage.getItem(claimKey);
+      if (existingClaim && existingClaim !== this.config.device) throw new SyncError('identity');
       const credential = this.credential(login, password);
       const dav = this.dav(endpoint, credential);
       const probe = await RemoteVault.probe(dav);
@@ -232,7 +235,7 @@ export default class TotalSync extends Plugin {
     await this.operate(async () => {
       const key = 'total-sync-claim-' + this.config.binding;
       await this.saveData(null);
-      if (localStorage.getItem(key) === this.config.device) localStorage.removeItem(key);
+      if (window.localStorage.getItem(key) === this.config.device) window.localStorage.removeItem(key);
       this.update({ binding: '', enabled: false });
       this.app.secretStorage.setSecret(secretKey, '');
       this.state = newState();
@@ -247,6 +250,11 @@ export default class TotalSync extends Plugin {
     const value = options({ ...this.config, ...change });
     this.app.saveLocalStorage(storageKey, value);
     this.config = value;
+    if (!value.enabled) {
+      window.clearTimeout(this.debounceTimer);
+      this.debounceTimer = undefined;
+      this.clearRetry();
+    }
     this.updateRibbon();
     this.configureTimer();
   }
@@ -281,14 +289,14 @@ export default class TotalSync extends Plugin {
       this.statusItem.title = exactTime ?? age.text;
     }
     this.onStatus?.(age.text, exactTime);
-    if (age.refreshIn !== null && !document.hidden && (this.onStatus || this.config.binding)) {
+    if (age.refreshIn !== null && !activeDocument.hidden && (this.onStatus || this.config.binding)) {
       this.statusTimer = window.setTimeout(() => this.refreshStatus(), age.refreshIn);
     }
   }
 
   private allowed(): boolean {
     return !this.stopped && !this.stateError && !!this.config.binding && this.config.enabled
-      && !(Platform.isMobile && document.hidden);
+      && !(Platform.isMobile && activeDocument.hidden);
   }
 
   private configureTimer(): void {
@@ -317,28 +325,46 @@ export default class TotalSync extends Plugin {
     this.queued = true;
     this.refreshStatus();
     this.debounceTimer = window.setTimeout(() => {
+      this.debounceTimer = undefined;
       this.queued = false;
       void this.sync(false);
     }, this.config.debounce * 1000);
   }
 
   private scheduleRetry(delay: number): void {
-    if (!this.allowed() || this.syncController?.signal.aborted || this.retryTimer !== undefined) return;
+    if (!this.allowed() || this.syncController?.signal.aborted) return;
+    const at = Date.now() + delay;
+    if (this.retryTimer !== undefined && this.retryAt <= at) return;
+    window.clearTimeout(this.retryTimer);
+    this.retryAt = at;
     this.queued = true;
     this.refreshStatus();
     this.retryTimer = window.setTimeout(() => {
       this.retryTimer = undefined;
       this.queued = false;
-      if (this.allowed()) void this.sync(false);
+      if (!this.allowed()) return;
+      // A profile preview or another local operation may still be running when this
+      // timer fires. Keep the retry rather than silently dropping it as "busy".
+      if (this.working) this.scheduleRetry(1000);
+      else void this.sync(false);
     }, delay);
   }
 
-  private retryAfterFailure(code: SyncError['code'], phase?: SyncError['phase']): void {
-    const recoverablePublication = code === 'uncertain'
-      && (phase === 'revision-intent' || phase === 'revision-reserve' || phase === 'revision-index' || phase === 'commit-marker');
-    if (!recoverablePublication && !['network', 'timeout', 'cloud-lock', 'cloud-advanced', 'cloud-preparing', 'upload-retry', 'rate', 'server'].includes(code)) return;
+  private clearRetry(): void {
+    window.clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    this.retryAt = 0;
+    this.queued = this.debounceTimer !== undefined;
+  }
+
+  private retryAfterFailure(code: SyncError['code']): void {
+    // A full pass rechecks the journal and published head. It never blindly repeats
+    // an ambiguous lock acquisition or DELETE; RemoteVault retains those safeguards.
+    if (!['network', 'timeout', 'uncertain', 'cloud-lock', 'cloud-unlock', 'cloud-advanced', 'cloud-preparing', 'upload-retry', 'rate', 'server'].includes(code)
+      || this.retryTimer !== undefined) return;
     const delay = Math.min(300, this.config.retry * 2 ** Math.min(8, this.retryCount++));
     this.scheduleRetry((delay + Math.random()) * 1000);
+    if (this.retryTimer !== undefined) this.record('retry-scheduled seconds=' + Math.ceil((this.retryAt - Date.now()) / 1000));
   }
 
   files(): ObsidianFiles {
@@ -550,6 +576,7 @@ export default class TotalSync extends Plugin {
       if (manual && !this.feedback?.running) new Notice(errorText('busy'));
       return;
     }
+    this.clearRetry();
     const controller = new AbortController();
     this.syncController = controller;
     this.feedback?.start();
@@ -562,6 +589,8 @@ export default class TotalSync extends Plugin {
       await this.saveData({ binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess: this.lastSuccess });
       this.state = result.state;
       this.devices = result.devices;
+      // A separate plugin-profile error must not hide a retryable note-sync error.
+      if (!controller.signal.aborted) for (const code of result.errors) this.retryAfterFailure(code);
       if (this.profile === 'windows' && this.config.plugins) {
         const service = this.pluginProfiles();
         if (!service.configured()) throw new SyncError('plugin-pending');
@@ -584,7 +613,6 @@ export default class TotalSync extends Plugin {
       if (!complete) {
         this.currentError = result.errors[0] ?? (n.review ? 'merge-conflict' : 'path');
         this.record(this.currentError, this.currentError === 'upload-retry' ? result.uploadRetryStatus : undefined);
-        if (!controller.signal.aborted) this.retryAfterFailure(this.currentError);
       }
       if (result.newConflicts) notifyMarkdownConflicts(this);
       if (n.conflict > result.merged) new Notice(t('TotalSync saved conflicting versions. Check conflict copies and history.', 'TotalSync сохранил конфликтующие версии. Проверьте копии и историю.'));
@@ -612,7 +640,9 @@ export default class TotalSync extends Plugin {
   }
 
   private showSyncError(code: SyncError['code']): void {
-    const message = errorText(code);
+    const seconds = Math.max(1, Math.ceil((this.retryAt - Date.now()) / 1000));
+    const message = errorText(code) + (this.retryTimer === undefined ? ''
+      : t(' Automatic retry in ' + seconds + ' s.', ' Автоповтор через ' + seconds + ' с.'));
     if (this.feedback) this.feedback.finish(code === 'cancelled' ? 'cancelled' : 'error', message);
     else new Notice(message);
   }
@@ -632,7 +662,7 @@ export default class TotalSync extends Plugin {
       this.currentError = failure.code;
       this.record(failure.code, failure.status, failure.phase);
       if (notify) new Notice(errorText(failure.code));
-      if (retry && !this.syncController?.signal.aborted) this.retryAfterFailure(failure.code, failure.phase);
+      if (retry && !this.syncController?.signal.aborted) this.retryAfterFailure(failure.code);
       return undefined;
     } finally {
       this.working = false;

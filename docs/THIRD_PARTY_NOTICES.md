@@ -6,6 +6,7 @@ The distribution bundles original code only. `obsidian` is provided by the host.
 | --- | --- |
 | esbuild | MIT |
 | ESLint | MIT |
+| eslint-plugin-obsidianmd | MIT |
 | Obsidian API declarations | MIT |
 | TypeScript | Apache-2.0 |
 | typescript-eslint | MIT |

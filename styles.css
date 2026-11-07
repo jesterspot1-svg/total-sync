@@ -166,3 +166,6 @@ body:has(.total-sync-conflict-dialog) .total-sync-feedback-mobile {
 .total-sync-plugin-fingerprint { display: block; overflow-wrap: anywhere; user-select: text; }
 .total-sync-plugin-error { color: var(--text-error); }
 .total-sync-plugin-preview { max-block-size: 10rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.total-sync-textarea {
+  width: 100%;
+}

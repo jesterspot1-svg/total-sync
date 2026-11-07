@@ -164,7 +164,7 @@ export class PluginSync {
           for (const [name, ref] of Object.entries(pkg.files)) {
             this.check();
             const bytes = await this.files.packageBytes(f.id, name);
-            if (bytes.byteLength !== ref!.size || await sha256(bytes) !== ref!.hash) throw new SyncError('changed');
+            if (bytes.byteLength !== ref.size || await sha256(bytes) !== ref.hash) throw new SyncError('changed');
             await this.transfer.upload(bytes);
             this.progress?.(++completed, total);
           }
@@ -203,12 +203,12 @@ export class PluginSync {
     // The catalog is independently resolved; a remote profile cannot substitute a repository URL.
     const trusted = sources.some(s => s.device === this.device || this.state!.trustedCode[s.device] === s.fingerprint);
     if (!trusted) {
-      const official = await this.catalog.package(id, pkg.version, pkg.files as Record<string, { hash: string; size: number }>);
+      const official = await this.catalog.package(id, pkg.version, pkg.files);
       if (official) return official;
       throw new SyncError('plugin-trust');
     }
     const result = new Map<string, ArrayBuffer>();
-    for (const [name, ref] of Object.entries(pkg.files)) { this.check(); result.set(name, await this.transfer.blob(ref!)); }
+    for (const [name, ref] of Object.entries(pkg.files)) { this.check(); result.set(name, await this.transfer.blob(ref)); }
     return result;
   }
   async resolve(path: string, device: string): Promise<void> {

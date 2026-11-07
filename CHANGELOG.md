@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.0
+
+- Prepare and verify ordinary file uploads before acquiring the shared cloud metadata lock; retain fresh head verification before publication.
+- Keep automatic recovery retries when another TotalSync operation is busy, expedite them when connectivity returns, and show the retry delay. Uncertain lock operations are rechecked safely without blindly deleting locks.
+- Apply a plugin change without rescanning unrelated packages. Read each manifest once per scan and retain independent on-disk verification, rollback and recovery.
+- Adopt the official Obsidian ESLint rules, update the development dependency graph, remove redundant operations, and use current host UI APIs with compatibility fallbacks.
+- Publish current English/Russian setup, privacy, recovery and limitation documentation. Keep the existing cloud layout and minimum Obsidian version compatible.
+
+## 0.1.18 · Test prerelease
+
+- Correct the portable preference names for Outliner 4.10.2, including vertical indentation lines; keep its local release marker unchanged.
+
+## 0.1.17 · Test prerelease
+
+- Keep signing-key identifiers within Obsidian SecretStorage's length limit and report key-storage failures separately from local file errors.
+
+## 0.1.16 · Test prerelease
+
+- Add opt-in Windows plugin profiles: exact packages, enabled state, portable settings, source trust, conflict review, transactional application and recovery.
+
 ## 0.1.15 · Test prerelease
 
 - Add a TotalSync action to Obsidian's mobile ribbon menu. Use the mobile quick-access setting to run sync with a short press of the bottom-right button.

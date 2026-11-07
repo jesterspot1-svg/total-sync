@@ -633,6 +633,66 @@ test('uncertain upload of an unreferenced blob releases the lock and can be retr
   assert.equal(b.local.text('Retry.md'), 'pending');
 });
 
+test('ordinary small and large file uploads are verified before acquiring the legacy lock', async t => {
+  const { a, b, server, id } = await setup(t);
+  const lock = '/' + ROOT + '/vaults/' + id + '/metadata/lock';
+  a.local.put('Small.md', 'ready');
+  a.local.put('Large.bin', new ArrayBuffer(2 * 1024 * 1024 + 1));
+  let uploads = 0;
+  server.afterMutation = (method, path) => {
+    if (method === 'PUT' && path.includes('/content/')) {
+      assert.equal(server.folders.has(lock), false);
+      uploads++;
+    }
+    return undefined;
+  };
+  assert.equal((await a.run()).counts.push, 2);
+  assert.equal(uploads, 2);
+  assert.equal((await b.run()).counts.pull, 2);
+  assert.equal(b.local.text('Small.md'), 'ready');
+  assert.equal((await b.local.read('content', 'Large.bin')).byteLength, 2 * 1024 * 1024 + 1);
+});
+
+test('a connection lost during upload leaves no cloud lock or reserved revision', async t => {
+  const { a, b, server, id } = await setup(t);
+  const meta = '/' + ROOT + '/vaults/' + id + '/metadata';
+  a.local.put('Interrupted.md', 'pending');
+  server.afterMutation = (method, path) => {
+    if (method === 'PUT' && path.includes('/content/')) server.offline = true;
+    return undefined;
+  };
+  await assert.rejects(a.run(), fails('network'));
+  assert.equal(server.folders.has(meta + '/lock'), false);
+  assert.equal(server.folders.has(meta + '/revisions/1'), false);
+  server.offline = false;
+  server.afterMutation = undefined;
+  assert.equal((await a.run()).counts.push, 1);
+  assert.equal((await b.run()).counts.pull, 1);
+  assert.equal(b.local.text('Interrupted.md'), 'pending');
+});
+
+test('a head change during unlocked preparation causes replanning instead of overwriting it', async t => {
+  const { a, b, server } = await setup(t);
+  a.local.put('Draft.md', 'base');
+  await a.run();
+  await b.run();
+  a.local.put('Draft.md', 'base\nnew laptop');
+  b.local.put('Draft.md', 'base\nold laptop');
+  const read = a.local.read.bind(a.local);
+  let advanced = false;
+  a.local.read = async (channel, path) => {
+    if (!advanced) { advanced = true; await b.run(); }
+    return read(channel, path);
+  };
+  await assert.rejects(a.run(), fails('cloud-advanced'));
+  assert.equal(a.local.text('Draft.md'), 'base\nnew laptop');
+  assert.equal(b.local.text('Draft.md'), 'base\nold laptop');
+  for (const client of [a, b]) await client.run();
+  for (const client of [a, b]) assert.deepEqual(new Set(client.local.text('Draft.md')?.split('\n')),
+    new Set(['base', 'new laptop', 'old laptop']));
+  assert.ok(![...server.folders].some(path => path.endsWith('/metadata/lock')));
+});
+
 test('successful commit and lock removal can be verified after the server loses both replies', async t => {
   const { a, b, server } = await setup(t);
   a.local.put('Verified.md', 'ready');
@@ -775,7 +835,8 @@ test('an ambiguous lock acquisition reports its phase and preserves the existing
   await assert.rejects(a.run(), error => error instanceof SyncError
     && error.code === 'uncertain' && error.status === 504 && error.phase === 'lock-acquire');
   assert.ok([...server.folders].some(path => path.endsWith(lock)));
-  assert.equal(server.requests.slice(start).some(row => row.method === 'PUT' || row.method === 'DELETE'), false);
+  assert.equal(server.requests.slice(start).some(row => row.method === 'DELETE'
+    || (row.method === 'PUT' && row.path.includes('/metadata/'))), false);
   assert.equal((await remote.head(null)).revision, 0);
 });
 

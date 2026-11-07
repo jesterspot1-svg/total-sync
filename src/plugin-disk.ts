@@ -28,7 +28,7 @@ interface Transaction { schema: 1; id: string; token: string; enabled: boolean; 
 
 export class PluginFiles {
   readonly base: string;
-  private readonly cache = new Map<string, { size: number; mtime: number; hash: string }>();
+  private readonly cache = new Map<string, { sourceSize: number; size: number; mtime: number; hash: string }>();
   constructor(readonly disk: PluginDisk, readonly configDir: string, private readonly runtime: PluginRuntime,
     readonly extra: Record<string, string[]> = {}) {
     this.extra = Object.assign(Object.create(null) as Record<string, string[]>, extra);
@@ -56,7 +56,7 @@ export class PluginFiles {
     const path = this.configDir + '/community-plugins.json';
     if (!await this.disk.exists(path)) return [];
     const data = await this.read(path);
-    if (!Array.isArray(data) || !data.every(x => typeof x === 'string' && safePluginId(x))) throw new SyncError('configuration');
+    if (!Array.isArray(data) || !data.every((x): x is string => typeof x === 'string' && safePluginId(x))) throw new SyncError('configuration');
     return data;
   }
   async watchStamp(): Promise<string> {
@@ -91,15 +91,17 @@ export class PluginFiles {
     const bytes = await this.disk.readBinary(path);
     return name === 'manifest.json' ? encode(canonical(parse(bytes))) : bytes;
   }
-  async scan(force = false): Promise<InstalledPlugin[]> {
+  async scan(force = false, onlyId?: string): Promise<InstalledPlugin[]> {
     const root = this.configDir + '/plugins';
     if (!await this.disk.exists(root)) return [];
     const enabled = new Set(await this.enabled());
     const result: InstalledPlugin[] = [];
-    for (const dir of (await this.disk.list(root)).folders) {
+    const directories = onlyId === undefined ? (await this.disk.list(root)).folders : [this.dir(onlyId)];
+    for (const dir of directories) {
       const id = dir.slice(root.length + 1);
       if (!safePluginId(id) || id === 'total-sync' || !await this.disk.exists(dir + '/manifest.json')) continue;
-      const manifest = parse(await this.packageBytes(id, 'manifest.json'));
+      const manifestBytes = await this.packageBytes(id, 'manifest.json');
+      const manifest = parse(manifestBytes);
       if (!object(manifest) || manifest.id !== id || typeof manifest.version !== 'string' || !safeVersion(manifest.version)) throw new SyncError('configuration');
       const pkg: PluginPackage = { version: manifest.version, files: {} };
       for (const name of packageNames) {
@@ -108,9 +110,9 @@ export class PluginFiles {
         if (!stat) continue;
         if (stat.type !== 'file' || stat.size > 128 * 1024 * 1024 || stat.size === 0) throw new SyncError('size');
         let cached = this.cache.get(path);
-        if (force || !cached || cached.size !== stat.size || cached.mtime !== stat.mtime) {
-          const bytes = await this.packageBytes(id, name);
-          cached = { size: bytes.byteLength, mtime: stat.mtime, hash: await sha256(bytes) };
+        if (force || !cached || cached.sourceSize !== stat.size || cached.mtime !== stat.mtime) {
+          const bytes = name === 'manifest.json' ? manifestBytes : await this.packageBytes(id, name);
+          cached = { sourceSize: stat.size, size: bytes.byteLength, mtime: stat.mtime, hash: await sha256(bytes) };
           this.cache.set(path, cached);
         }
         pkg.files[name] = { hash: cached.hash, size: cached.size };
@@ -123,6 +125,10 @@ export class PluginFiles {
         requiredLocal: Object.keys(raw).filter(k => !Object.prototype.hasOwnProperty.call(settings, k) && needsLocalValue(k, raw[k])).sort() });
     }
     return result;
+  }
+  private invalidate(id: string): void {
+    const prefix = this.dir(id) + '/';
+    for (const path of this.cache.keys()) if (path.startsWith(prefix)) this.cache.delete(path);
   }
   fields(plugins: InstalledPlugin[]): Record<string, FieldValue> {
     const result: Record<string, FieldValue> = {};
@@ -153,7 +159,7 @@ export class PluginFiles {
     files: Map<string, ArrayBuffer>, settings: Record<string, FieldValue>, enabled: boolean): Promise<void> {
     if (await this.interrupted()) throw new SyncError('plugin-recovery');
     const dir = this.dir(id);
-    const current = (await this.scan(true)).find(p => p.id === id);
+    const current = (await this.scan(true, id))[0];
     if (canonical(current ?? null) !== canonical(expected ?? null)) throw new SyncError('changed');
     const writes = new Map(files);
     if (Object.keys(settings).some(key => !allowedPreference(id, key, this.extra[id]))) throw new SyncError('configuration');
@@ -181,7 +187,7 @@ export class PluginFiles {
     const backup = this.base + '/backups/' + tx.token;
     await this.mkdir(backup);
     for (const name of new Set([...writes.keys(), ...removals])) {
-      if (![...packageNames, 'data.json'].includes(name as typeof packageNames[number])) throw new SyncError('path');
+      if (![...packageNames, 'data.json'].includes(name)) throw new SyncError('path');
       const before = await this.disk.exists(dir + '/' + name) ? await this.disk.readBinary(dir + '/' + name) : null;
       if (before) await this.disk.writeBinary(backup + '/' + name, before);
       const after = writes.get(name);
@@ -193,7 +199,7 @@ export class PluginFiles {
     try {
       if (!hot && this.runtime.loaded(id)) await this.runtime.unload(id);
       // unload hooks may flush data.json; preserve new local secrets, but never hide portable edits.
-      const afterUnload = (await this.scan(true)).find(p => p.id === id);
+      const afterUnload = (await this.scan(true, id))[0];
       if (canonical(afterUnload ?? null) !== canonical(expected ?? null)) throw new SyncError('changed');
       if (writes.has('data.json')) {
         const raw = await this.rawSettings(id);
@@ -220,11 +226,11 @@ export class PluginFiles {
       for (const name of removals) if (await this.disk.exists(dir + '/' + name)) await this.disk.remove(dir + '/' + name);
       if (hot) await this.runtime.reloadSettings!(id);
       else { await this.runtime.reloadManifests(); await this.runtime.enable(id, pkg !== null && enabled); }
-      const applied = (await this.scan(true)).find(p => p.id === id);
+      const applied = (await this.scan(true, id))[0];
       if (canonical(applied?.pkg ?? null) !== canonical(pkg) || (applied?.enabled ?? false) !== (pkg !== null && enabled)
         || (pkg && Object.entries(settings).some(([key, value]) => canonical(settingValue(applied?.settings ?? {}, key)) !== canonical(value)))) throw new SyncError('changed');
       await this.clearJournal();
-      this.cache.clear();
+      this.invalidate(id);
     } catch (error) {
       await this.recover();
       throw error;
@@ -249,7 +255,7 @@ export class PluginFiles {
     const backup = this.base + '/backups/' + tx.token;
     const originals = new Map<string, ArrayBuffer | null>();
     for (const file of tx.files) {
-      if (!file || ![...packageNames, 'data.json'].includes(file.name as typeof packageNames[number])) throw new SyncError('integrity');
+      if (!file || ![...packageNames, 'data.json'].includes(file.name)) throw new SyncError('integrity');
       const bytes = file.before ? await this.disk.readBinary(backup + '/' + file.name) : null;
       if (bytes && await sha256(bytes) !== file.before) throw new SyncError('integrity');
       originals.set(file.name, bytes);
@@ -272,6 +278,6 @@ export class PluginFiles {
     if (hot) await this.runtime.reloadSettings!(tx.id);
     else { await this.runtime.reloadManifests(); await this.runtime.enable(tx.id, tx.enabled); }
     await this.clearJournal();
-    this.cache.clear();
+    this.invalidate(tx.id);
   }
 }

@@ -19,6 +19,7 @@ class Element {
     if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this);
   }
   createDiv(options) { return this.createEl('div', options); }
+  createSpan(options) { return this.createEl('span', options); }
   createEl(tag, options) {
     const child = new Element();
     Object.assign(child, { tag, parent: this, ...options });
@@ -36,6 +37,8 @@ class Control {
   onChange(callback) { this.change = callback; return this; }
   onClick(callback) { this.click = callback; return this; }
   setCta() { return this; }
+  setWarning() { return this; }
+  setDestructive() { return this; }
 }
 
 class Setting {
@@ -70,6 +73,7 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   let savedData = null;
   let timerId = 0;
   const window = {
+    localStorage: { getItem: key => claims.get(key), setItem: (key, value) => claims.set(key, value), removeItem: key => claims.delete(key) },
     setTimeout(callback, delay) {
       const id = ++timerId;
       timers.set(id, { callback, delay });
@@ -123,6 +127,7 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
     exports: module.exports,
     require: name => { assert.equal(name, 'obsidian'); return api; },
     window,
+    activeDocument: { body, hidden: false },
     document: { body, hidden: false },
     Date: class extends Date { static now() { return now; } },
     localStorage: { getItem: key => claims.get(key), setItem: (key, value) => claims.set(key, value) },
@@ -383,6 +388,44 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   assert.ok([...timers.values()].some(timer => timer.delay === 7000));
   assert.ok(syncAgeText().includes(minuteAgo));
   assert.equal(savedData.lastSuccess, lastSuccessfulTime);
+  assert.match(text.textContent, /Automatic retry|Автоповтор/);
+  const retry = plugin.retryTimer;
+  assert.ok(timers.has(retry));
+  plugin.working = true;
+  timers.get(retry).callback();
+  timers.delete(retry);
+  assert.equal(plugin.queued, true, 'A busy operation must not consume the scheduled retry');
+  assert.equal(timers.get(plugin.retryTimer).delay, 1000);
+  plugin.working = false;
+  const originalSync = plugin.sync;
+  let retryPass;
+  plugin.sync = (...args) => { retryPass = originalSync.apply(plugin, args); return retryPass; };
+  const deferredRetry = plugin.retryTimer;
+  timers.get(deferredRetry).callback();
+  timers.delete(deferredRetry);
+  assert.ok(retryPass, 'The deferred timer must actually start synchronization');
+  assert.equal(plugin.retryTimer, undefined);
+  resolve(success);
+  await retryPass;
+  plugin.sync = originalSync;
+  assert.equal(plugin.retryCount, 0);
+  assert.equal(plugin.queued, false, 'A successful run consumes the outstanding retry');
+  for (const code of ['uncertain', 'cloud-unlock', 'network', 'cloud-lock']) {
+    plugin.retryAfterFailure(code);
+    assert.ok(plugin.retryTimer !== undefined, code + ' must schedule safe recovery');
+    plugin.clearRetry();
+  }
+  plugin.retryAfterFailure('cloud-lock');
+  const later = plugin.retryTimer;
+  plugin.scheduleRetry(1000);
+  assert.equal(timers.has(later), false, 'Returning online should expedite a long backoff');
+  assert.equal(timers.get(plugin.retryTimer).delay, 1000);
+  plugin.update({ enabled: false });
+  assert.equal(plugin.retryTimer, undefined);
+  assert.equal(plugin.queued, false);
+  plugin.update({ enabled: true });
+  // The final stored time still needs to be one minute old when the plugin restarts.
+  now += 60_000;
   plugin.engine = () => ({ run: async () => { throw new Error('synthetic private exception'); } });
   await plugin.sync(true);
   assert.equal(badge.dataset.state, 'error');

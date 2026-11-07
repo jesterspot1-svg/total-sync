@@ -1,4 +1,4 @@
-import { App, Modal, Notice, PluginSettingTab, Setting } from 'obsidian';
+import { App, Modal, Notice, PluginSettingTab, Setting, requireApiVersion, type ButtonComponent } from 'obsidian';
 import { errorText, t } from './i18n';
 import type TotalSync from './main';
 import { idPattern, type Channel, type Profile } from './model';
@@ -10,6 +10,13 @@ import { MAIL } from './webdav';
 import { showPluginProfiles } from './plugin-ui';
 
 const project = 'https://github.com/jesterspot1-svg/total-sync';
+
+function destructive(button: ButtonComponent): ButtonComponent {
+  if (requireApiVersion('1.13.0')) return button.setDestructive();
+  // The legacy class retains destructive styling on supported Obsidian 1.11.5–1.12 clients.
+  button.buttonEl.addClass('mod-warning');
+  return button;
+}
 
 function channelName(channel: Channel): string {
   const labels: Record<Channel, [string, string]> = {
@@ -39,9 +46,9 @@ function actionName(action: Action): string {
 }
 
 export function notifyMarkdownConflicts(plugin: TotalSync): void {
-  const content = document.createDocumentFragment();
+  const content = createFragment();
   content.append(t('TotalSync saved both versions in history.', 'TotalSync сохранил обе версии в истории.'), ' ');
-  const button = document.createElement('button');
+  const button = createEl('button');
   button.textContent = t('Resolve conflicts', 'Разобрать конфликты');
   button.addEventListener('click', () => {
     notice.hide();
@@ -150,7 +157,7 @@ function confirm(app: App, title: string, description: string, label: string, ac
   modal.contentEl.createEl('p', { text: description });
   buttonRow(modal.contentEl)
     .addButton(btn => btn.setButtonText(t('Cancel', 'Отмена')).onClick(() => modal.close()))
-    .addButton(btn => btn.setWarning().setButtonText(label).onClick(async () => {
+    .addButton(btn => destructive(btn).setButtonText(label).onClick(async () => {
       modal.close();
       await action();
     }));
@@ -167,7 +174,7 @@ export async function showPlan(plugin: TotalSync): Promise<void> {
   modal.contentEl.createEl('p', { text: heading });
   if (changes.length) {
     const text = modal.contentEl.createEl('textarea', { attr: { readonly: '', rows: '14', 'aria-label': heading } });
-    text.style.width = '100%';
+    text.addClass('total-sync-textarea');
     text.value = [...changes].sort((a, b) => Number(b.action.startsWith('delete')) - Number(a.action.startsWith('delete')))
       .map(op => [actionName(op.action), channelName(op.channel), op.path].join(' · ')).join('\n');
   }
@@ -176,7 +183,7 @@ export async function showPlan(plugin: TotalSync): Promise<void> {
       'Review every deletion. The approval is valid only for the exact plan above. Sync must be enabled.',
       'Проверьте каждое удаление. Подтверждение действует только для плана выше. Синхронизация должна быть включена.',
     ) });
-    new Setting(modal.contentEl).addButton(btn => btn.setWarning()
+    new Setting(modal.contentEl).addButton(btn => destructive(btn)
       .setButtonText(t('Confirm deletions and sync', 'Подтвердить удаления и синхронизировать'))
       .onClick(async () => { modal.close(); await plugin.sync(true, preview.approval); }));
   }
@@ -269,7 +276,7 @@ function showInstallCommands(app: App, commands: readonly string[]): void {
     'Проверьте имя vault и ID. Запустите выбранные строки в PowerShell с настроенным Obsidian CLI. Строки с enable также включат плагин.',
   ) });
   const area = modal.contentEl.createEl('textarea', { attr: { readonly: '', rows: '8', 'aria-label': title } });
-  area.style.width = '100%';
+  area.addClass('total-sync-textarea');
   area.value = commands.join('\n');
   modal.contentEl.createEl('a', { text: t('Obsidian CLI instructions', 'Настройка Obsidian CLI'), href: 'https://obsidian.md/help/cli' });
   new Setting(modal.contentEl).addButton(btn => btn
@@ -358,15 +365,15 @@ export class SettingsTab extends PluginSettingTab {
     let id = plugin.config.binding;
     let writeId = (value: string) => { id = value; };
     new Setting(el).setName(t('Remote vault ID', 'Удалённый ID хранилища'))
-      .setDesc(t('Use a newly generated ID for the first test vault and the same ID on the other devices.',
-        'Для первого тестового хранилища сгенерируйте ID. На остальных устройствах используйте тот же ID.'))
+      .setDesc(t('Generate an ID on the first device. Use the same ID on your other devices.',
+        'На первом устройстве создайте ID. На остальных устройствах используйте тот же ID.'))
       .addText(text => {
         text.setValue(id).setDisabled(!!plugin.config.binding).onChange(value => { id = value.trim().toLowerCase(); });
         writeId = value => { id = value; text.setValue(value); };
       });
     if (!plugin.config.binding) {
       let generated = '';
-      buttonRow(el, t('Set up a test vault', 'Подключение тестового хранилища'))
+      buttonRow(el, t('Set up a vault', 'Подключение хранилища'))
         .addButton(btn => btn.setButtonText(t('Generate ID', 'Создать ID')).onClick(() => {
           generated = crypto.randomUUID();
           writeId(generated);
@@ -379,7 +386,8 @@ export class SettingsTab extends PluginSettingTab {
         }))
         .addButton(btn => btn.setButtonText(t('Join by ID', 'Подключить по ID')).onClick(() => confirm(
           plugin.app, t('Connect this local vault', 'Подключить локальное хранилище'),
-          t('This ID identifies the shared test vault. Connect only this isolated test vault.', 'Этот ID указывает на общее тестовое хранилище. Подключайте только отдельный тестовый vault.'),
+          t('This local vault will sync with the vault identified by this ID. Verify the ID and keep a backup before enabling sync.',
+            'Локальное хранилище будет синхронизироваться с хранилищем под этим ID. Проверьте ID и сохраните резервную копию перед включением синхронизации.'),
           t('Connect', 'Подключить'), async () => {
             await plugin.bind(endpoint, login, password, id, false);
             clearPassword();
@@ -398,7 +406,7 @@ export class SettingsTab extends PluginSettingTab {
     const devices = new Setting(el).setName(t('Registered devices', 'Зарегистрированные устройства'));
     new Setting(el).setName(t('Sync', 'Синхронизация')).setHeading();
     this.toggle('enabled', 'Enable sync', 'Включить синхронизацию',
-      ['Review the plan before enabling. Use a separate synthetic test vault.', 'Перед включением проверьте план. Используйте отдельное хранилище с искусственными данными.']);
+      ['Keep a backup and review the plan before enabling.', 'Перед включением сохраните резервную копию и проверьте план.']);
     if (plugin.profile === 'mobile') {
       new Setting(el).setName(t('Mobile quick access', 'Быстрый запуск на телефоне')).setDesc(t(
         'Open the bottom-right menu to find the TotalSync icon. You can pin it under Ribbon menu in Obsidian settings.',
@@ -471,7 +479,7 @@ export class SettingsTab extends PluginSettingTab {
     buttonRow(el).addButton(btn => btn.setButtonText(t('History', 'История')).onClick(() => showHistory(plugin)))
       .addButton(btn => btn.setButtonText(t('Diagnostics', 'Диагностика')).onClick(() => this.diagnostics()));
     const help = el.createEl('p');
-    help.createEl('a', { text: t('Beta test instructions', 'Инструкция для beta'), href: project + '/blob/main/docs/BETA_TEST_INSTRUCTION_RU.md' });
+    help.createEl('a', { text: t('User guide in Russian', 'Инструкция пользователя'), href: project + '/blob/main/docs/USER_GUIDE_RU.md' });
     help.appendText(' · ');
     help.createEl('a', { text: 'GitHub Issues', href: project + '/issues' });
 
@@ -497,7 +505,7 @@ export class SettingsTab extends PluginSettingTab {
         + (item.status ? ' HTTP ' + item.status : '') + (item.phase ? ' phase=' + item.phase : '')),
     ].join('\n');
     const area = modal.contentEl.createEl('textarea', { attr: { rows: '12', readonly: '', 'aria-label': label } });
-    area.style.width = '100%';
+    area.addClass('total-sync-textarea');
     area.value = data;
     new Setting(modal.contentEl).addButton(btn => btn.setButtonText(t('Copy diagnostics', 'Скопировать диагностику')).onClick(async () => {
       try {
