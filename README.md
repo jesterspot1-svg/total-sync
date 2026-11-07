@@ -9,7 +9,7 @@ Requires **Obsidian 1.11.5 or later**, a Mail Cloud account and an app password 
 ## Setup
 
 1. Back up the vault, including `.obsidian`. Disable other sync plugins for this vault to avoid competing writes.
-2. Until TotalSync is approved in the Community Directory, install or update it through **BRAT** using `https://github.com/jesterspot1-svg/total-sync`. A GitHub release alone does not mean the directory listing has been approved.
+2. Install and enable [TotalSync from the Community Directory](https://community.obsidian.md/plugins/total-sync), or use **Settings → Community plugins → Browse → TotalSync**. Update existing installations through Community plugins. BRAT remains an optional way to receive test releases from `jesterspot1-svg/total-sync`; it is not required for the stable release. Do not uninstall an existing copy to switch update methods.
 3. On the first device, open **Settings → TotalSync**, enter the Mail login and app password, then **Check connection**. Choose **Generate ID**, then **Create remote vault**.
 4. Review **Show sync plan**, enable synchronization, and run **Sync now**. Wait for the initial upload to finish.
 5. On each other device, create or open the corresponding local vault, install TotalSync, enter the Mail credentials locally, and paste the same remote ID. Choose **Join by ID**, review the plan, then enable and run synchronization. The remote ID identifies the shared data; the local name alone does not connect vaults.
