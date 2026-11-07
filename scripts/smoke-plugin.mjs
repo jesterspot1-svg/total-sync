@@ -372,14 +372,23 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   assert.equal(badge.dataset.state, 'success');
   assert.equal(stop.hidden, true);
   assert.equal(icon.icon, 'check');
+  assert.equal(icon.hidden, false);
   assert.equal(text.textContent, mobile ? 'Sync complete' : 'Синхронизация завершена');
   assert.ok(syncAgeText().includes(justNow));
   if (!mobile) assert.equal(statusBar.children[0].hidden, false);
   tick(3500);
   assert.equal(badge.hidden, mobile);
+  if (!mobile) {
+    assert.equal(icon.hidden, true, 'The success check disappears after the feedback timer');
+    assert.equal(text.textContent, justNow);
+  }
   now += 60_000;
   tick(60_000);
   assert.ok(syncAgeText().includes(minuteAgo));
+  if (!mobile) {
+    assert.equal(icon.hidden, true, 'Refreshing the sync age does not restore the check');
+    assert.equal(text.textContent, minuteAgo);
+  }
 
   const idle = plugin.sync(false);
   controls.progress(0, 0);
@@ -388,8 +397,10 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   await idle;
   assert.equal(badge.hidden, false);
   assert.equal(icon.icon, 'check', 'An automatic sync with no changes still confirms success');
+  assert.equal(icon.hidden, false);
   tick(3500);
   assert.equal(badge.hidden, mobile);
+  if (!mobile) assert.equal(icon.hidden, true);
   assert.ok(syncAgeText().includes(justNow));
   const lastSuccessfulTime = savedData.lastSuccess;
   now += 60_000;
@@ -461,6 +472,7 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   await plugin.sync(true);
   assert.equal(badge.dataset.state, 'error');
   assert.doesNotMatch(text.textContent, /synthetic private exception/);
+  plugin.update({ startup: false });
   plugin.tab.hide();
   plugin.onunload();
   assert.equal(timers.size, 0);
@@ -474,11 +486,14 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   restarted.tab.display();
   const restoredStatus = restarted.tab.containerEl.children.find(row => row.name === (mobile ? 'Status' : 'Состояние'));
   assert.ok(restoredStatus.description.includes(minuteAgo));
+  if (!mobile) {
+    const [restoredIcon, restoredText] = statusBar.children[0].children[0].children[0].children;
+    assert.equal(restoredIcon.hidden, true, 'Restoring the last sync time does not replay the success check');
+    assert.equal(restoredText.textContent, minuteAgo);
+  }
   assert.throws(() => restarted.update({ endpoint: 'https://different.example.com/dav' }), 'A bound endpoint cannot be silently replaced');
   const previousIdentity = restarted.config.device;
-  // Ensure the unrelated startup run has settled before intentionally disconnecting this synthetic vault.
   restarted.update({ enabled: false });
-  for (let i = 0; restarted.working && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 5));
   await restarted.disconnect();
   assert.equal(restarted.config.binding, '');
   assert.equal(restarted.config.enabled, false);

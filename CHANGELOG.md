@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Show the desktop success check for 3.5 seconds after a successful sync. The status bar then shows only the last sync time, and restoring that time on startup does not replay the check.
+
 ## 0.3.0
 
 - Choose Russian, English or the Obsidian language in TotalSync settings; update command names and status text immediately.

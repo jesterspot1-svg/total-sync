@@ -339,7 +339,7 @@ export default class TotalSync extends Plugin {
     if (this.statusItem) {
       this.statusItem.hidden = !this.config.binding && !this.working;
     }
-    this.feedback?.setIdle(age.text, exactTime, this.lastSuccess !== null);
+    this.feedback?.setIdle(age.text, exactTime);
     this.onStatus?.(age.text, exactTime);
     if (age.refreshIn !== null && !activeDocument.hidden && (this.onStatus || this.config.binding)) {
       this.statusTimer = window.setTimeout(() => this.refreshStatus(), age.refreshIn);

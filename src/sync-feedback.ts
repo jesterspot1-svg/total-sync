@@ -14,8 +14,7 @@ export class SyncFeedback {
   private transient = false;
   private idleText = '';
   private idleTitle = '';
-  private idleSuccess = false;
-  private lastResult?: Exclude<State, 'running'>;
+  private lastIssue?: 'error' | 'cancelled';
   private lastMessage = '';
 
   constructor(host: HTMLElement, private readonly mobile: boolean, onStop: () => void) {
@@ -44,10 +43,9 @@ export class SyncFeedback {
     this.show('running', t('Syncing…', 'Синхронизация…'));
   }
 
-  setIdle(text: string, exactTime: string | null, success: boolean): void {
+  setIdle(text: string, exactTime: string | null): void {
     this.idleText = text;
     this.idleTitle = exactTime ?? text;
-    this.idleSuccess = success;
     if (!this.transient) this.renderIdle();
   }
 
@@ -66,8 +64,8 @@ export class SyncFeedback {
   }
 
   finish(state: Exclude<State, 'running'>, text: string): void {
-    this.lastResult = state;
-    this.lastMessage = text;
+    this.lastIssue = state === 'success' ? undefined : state;
+    this.lastMessage = this.lastIssue ? text : '';
     this.show(state, text);
     this.hideTimer = window.setTimeout(() => this.clear(), state === 'error' ? 7000 : 3500);
   }
@@ -76,6 +74,7 @@ export class SyncFeedback {
     this.transient = true;
     window.clearTimeout(this.hideTimer);
     this.badge.dataset.state = state;
+    this.icon.hidden = false;
     setIcon(this.icon, icons[state]);
     this.badge.hidden = false;
     this.stopButton.hidden = state !== 'running';
@@ -91,9 +90,8 @@ export class SyncFeedback {
   }
 
   reset(): void {
-    this.lastResult = undefined;
+    this.lastIssue = undefined;
     this.lastMessage = '';
-    this.idleSuccess = false;
     this.clear();
   }
 
@@ -101,11 +99,11 @@ export class SyncFeedback {
     this.badge.hidden = this.mobile;
     this.stopButton.hidden = true;
     if (this.mobile) { this.label.textContent = ''; return; }
-    const state = this.lastResult ?? (this.idleSuccess ? 'success' : undefined);
-    this.badge.dataset.state = state ?? 'idle';
-    setIcon(this.icon, state ? icons[state] : 'clock');
+    this.badge.dataset.state = this.lastIssue ?? 'idle';
+    this.icon.hidden = this.lastIssue === undefined;
+    if (this.lastIssue) setIcon(this.icon, icons[this.lastIssue]);
     this.label.textContent = this.idleText;
-    this.badge.title = [state === 'error' || state === 'cancelled' ? this.lastMessage : '', this.idleTitle].filter(Boolean).join('\n');
+    this.badge.title = [this.lastMessage, this.idleTitle].filter(Boolean).join('\n');
   }
 
   dispose(): void {

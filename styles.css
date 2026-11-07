@@ -1,6 +1,7 @@
 .total-sync-ribbon[hidden],
 .total-sync-last-sync[hidden],
 .total-sync-feedback-stop[hidden],
+.total-sync-feedback-icon[hidden],
 .total-sync-feedback-badge[hidden] {
   display: none;
 }

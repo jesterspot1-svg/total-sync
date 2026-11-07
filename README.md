@@ -29,7 +29,7 @@ For Windows plugins, open **Plugins and settings** on the computer with the desi
 ## Everyday controls
 
 - **Language:** choose English, Russian or the Obsidian language in TotalSync settings.
-- **Desktop status bar:** a spinning icon and file count while syncing, a check mark after every successful run, and the time since the last success. Stop an active run from the same bar.
+- **Desktop status bar** shows a spinning icon and file count while syncing. A check mark appears briefly after each successful run, then the bar shows the time since the last success. Stop an active run from the same bar.
 - **Automatic sync:** at startup, after edits or at your chosen interval. Temporary network errors are retried automatically.
 - **Another server or account:** select **Change server or account**, then enter the new connection. Local notes and files in the old cloud are kept. Review the new sync plan before enabling it.
 - **Updates:** **Check and update** opens TotalSync's native Obsidian catalog page. Obsidian handles installation; BRAT is optional for test releases.
