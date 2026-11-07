@@ -75,6 +75,40 @@
   color: var(--text-error);
 }
 
+.total-sync-feedback-inline .total-sync-feedback-badge {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: inherit;
+  gap: 6px;
+}
+
+.total-sync-feedback-inline .total-sync-feedback-label {
+  max-inline-size: min(42ch, 40vw);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.total-sync-feedback-inline .total-sync-feedback-stop {
+  min-block-size: 22px;
+  padding: 0 5px;
+  font-size: inherit;
+  box-shadow: none;
+}
+
+.total-sync-settings .setting-item-control input[type="text"] {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+
+.is-mobile .total-sync-settings .setting-item-control {
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+
 @keyframes total-sync-spin {
   to {
     transform: rotate(1turn);

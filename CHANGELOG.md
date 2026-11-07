@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Choose Russian, English or the Obsidian language in TotalSync settings; update command names and status text immediately.
+- Connect to custom HTTPS WebDAV servers with Basic/app-password authentication, including nested folders and non-default ports. Check server capabilities before connecting. Retain existing Mail connections and cloud layout.
+- Store WebDAV credentials separately for each local connection. Add an explicit change-server/account flow that pauses sync, resets the local checkpoint and plugin trust scope, and keeps local notes and old cloud files.
+- Move desktop progress, the stop control and sync results into Obsidian's status bar. Confirm every successful automatic run with a check mark, even when no files changed. Keep mobile progress controls.
+- Add a settings button that opens TotalSync's native Obsidian catalog page for updates, without downloading or installing its own code.
+- Simplify the English/Russian catalog overview and setup guide. Add regression coverage for custom WebDAV paths, credential migration/isolation, language switching and automatic feedback.
+
 ## 0.2.0
 
 - Prepare and verify ordinary file uploads before acquiring the shared cloud metadata lock; retain fresh head verification before publication.

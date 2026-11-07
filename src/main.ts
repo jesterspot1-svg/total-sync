@@ -1,7 +1,7 @@
 import { Notice, Platform, Plugin, TFile, requestUrl, requireApiVersion, type TAbstractFile } from 'obsidian';
 import { SyncEngine, type ConflictChoice, type ConflictReview, type SyncControls } from './engine';
 import { Fingerprints } from './fingerprints';
-import { errorText, interfaceLocale, t } from './i18n';
+import { errorText, interfaceLocale, setInterfaceLanguage, t } from './i18n';
 import { validState } from './manifest';
 import { idPattern, newState, object, SyncError, type Manifest, type Profile, type SyncState } from './model';
 import { ObsidianFiles } from './obsidian-files';
@@ -10,7 +10,7 @@ import { options, prefixes, type Options } from './settings';
 import { formatSyncAge } from './sync-age';
 import { SyncFeedback } from './sync-feedback';
 import { SettingsTab, showHistory, showPlan, showInventory, showMarkdownConflicts, notifyMarkdownConflicts } from './ui';
-import { collectionResponse, MAIL, mailEndpoint, WebDav, type Transport } from './webdav';
+import { collectionResponse, MAIL, webdavEndpoint, WebDav, type Transport } from './webdav';
 import { PluginFiles, type PluginRuntime } from './plugin-disk';
 import { loadSigningKey } from './plugin-profile';
 import { PluginSync } from './plugin-sync';
@@ -18,7 +18,7 @@ import { PluginCatalog, PluginTransfer } from './plugin-transfer';
 import { showPluginProfiles } from './plugin-ui';
 
 const storageKey = 'total-sync-options-v1';
-const secretKey = 'total-sync-mail-webdav';
+const legacySecretKey = 'total-sync-mail-webdav';
 const syncIcon = 'refresh-cw';
 type Credential = { login: string; password: string };
 type Logged = { at: number; event: string; status?: number; phase?: SyncError['phase'] };
@@ -38,6 +38,7 @@ export default class TotalSync extends Plugin {
   private lastSuccess: number | null = null;
   working = false;
   queued = false;
+  get canStop(): boolean { return !!this.syncController && !this.syncController.signal.aborted; }
   currentError: SyncError['code'] | null = null;
   log: Logged[] = [];
   private onStatus?: (lastSync: string, exactTime: string | null) => void;
@@ -65,11 +66,22 @@ export default class TotalSync extends Plugin {
   async onload(): Promise<void> {
     this.suspended = Platform.isMobile && activeDocument.hidden;
     try {
-      this.config = options(this.app.loadLocalStorage(storageKey));
+      const previous: unknown = this.app.loadLocalStorage(storageKey);
+      this.config = options(previous);
+      // Copy the old shared Mail secret once, without removing it from other existing vaults.
+      if ((!object(previous) || previous.endpoint === undefined) && !this.app.secretStorage.getSecret(this.credentialKey())) {
+        const legacy = this.app.secretStorage.getSecret(legacySecretKey);
+        let credential: unknown;
+        try { credential = legacy ? JSON.parse(legacy) as unknown : null; } catch { credential = null; }
+        if (object(credential) && typeof credential.login === 'string' && typeof credential.password === 'string') {
+          this.app.secretStorage.setSecret(this.credentialKey(), JSON.stringify({ endpoint: MAIL, credential }));
+        }
+      }
       this.app.saveLocalStorage(storageKey, this.config);
       const saved: unknown = await this.loadData();
       if (this.config.binding) {
         if (!object(saved) || saved.binding !== this.config.binding || saved.device !== this.config.device
+          || (saved.endpoint ?? MAIL) !== this.config.endpoint
           || !validState(saved.state)) throw new SyncError('integrity');
         this.state = saved.state;
         this.lastSuccess = typeof saved.lastSuccess === 'number' && Number.isFinite(saved.lastSuccess) ? saved.lastSuccess : null;
@@ -80,7 +92,47 @@ export default class TotalSync extends Plugin {
       this.stateError = true;
       this.currentError = 'integrity';
     }
+    setInterfaceLanguage(this.config.language);
     this.addSettingTab(new SettingsTab(this.app, this));
+    this.registerCommands();
+    const changed = (file: TAbstractFile) => {
+      if (file instanceof TFile) this.fingerprints.invalidate(file);
+      const path = file.path;
+      if (!this.config.change || path.startsWith('.') || /^TotalSync-Recovery(?:\/|$)/i.test(path)) return;
+      if (this.working) this.changedWhileWorking = true;
+      else this.debounce();
+    };
+    this.registerEvent(this.app.vault.on('create', changed));
+    this.registerEvent(this.app.vault.on('modify', changed));
+    this.registerEvent(this.app.vault.on('delete', changed));
+    this.registerEvent(this.app.vault.on('rename', changed));
+    this.registerDomEvent(window, 'online', () => this.scheduleRetry(1000));
+    this.registerDomEvent(activeDocument, 'visibilitychange', () => {
+      this.suspended = Platform.isMobile && activeDocument.hidden;
+      this.refreshStatus();
+      if (Platform.isMobile && !this.suspended) this.scheduleRetry(1000);
+    });
+    this.app.workspace.onLayoutReady(() => {
+      if (this.stopped) return;
+      if (!Platform.isMobile) {
+        this.statusItem = this.addStatusBarItem();
+        this.statusItem.addClass('total-sync-last-sync');
+      }
+      this.feedback = new SyncFeedback(this.statusItem ?? activeDocument.body, Platform.isMobile, () => this.stopSync());
+      this.refreshStatus();
+      this.updateRibbon();
+      this.configureTimer();
+      if (this.config.startup && this.allowed()) void this.sync(false);
+    });
+  }
+
+  private commandsRegistered = false;
+
+  private registerCommands(): void {
+    if (this.commandsRegistered) {
+      for (const id of ['sync-now', 'show-plan', 'history', 'resolve-conflicts', 'plugin-profiles', 'inventory', 'publish-bookmarks', 'export-bookmarks', 'stop-sync']) this.removeCommand(id);
+    }
+    this.commandsRegistered = true;
     this.addCommand({ id: 'sync-now', name: t('Sync now', 'Синхронизировать сейчас'), icon: syncIcon, callback: () => { void this.sync(true); } });
     this.addCommand({ id: 'show-plan', name: t('Show sync plan', 'Показать план операций'), callback: () => { void showPlan(this); } });
     this.addCommand({ id: 'history', name: t('Show recovery history', 'Показать историю восстановления'), callback: () => { void showHistory(this); } });
@@ -115,35 +167,12 @@ export default class TotalSync extends Plugin {
         return true;
       },
     });
-    const changed = (file: TAbstractFile) => {
-      if (file instanceof TFile) this.fingerprints.invalidate(file);
-      const path = file.path;
-      if (!this.config.change || path.startsWith('.') || /^TotalSync-Recovery(?:\/|$)/i.test(path)) return;
-      if (this.working) this.changedWhileWorking = true;
-      else this.debounce();
-    };
-    this.registerEvent(this.app.vault.on('create', changed));
-    this.registerEvent(this.app.vault.on('modify', changed));
-    this.registerEvent(this.app.vault.on('delete', changed));
-    this.registerEvent(this.app.vault.on('rename', changed));
-    this.registerDomEvent(window, 'online', () => this.scheduleRetry(1000));
-    this.registerDomEvent(activeDocument, 'visibilitychange', () => {
-      this.suspended = Platform.isMobile && activeDocument.hidden;
-      this.refreshStatus();
-      if (Platform.isMobile && !this.suspended) this.scheduleRetry(1000);
-    });
-    this.app.workspace.onLayoutReady(() => {
-      if (this.stopped) return;
-      this.feedback = new SyncFeedback(activeDocument.body, Platform.isMobile, () => this.stopSync());
-      if (!Platform.isMobile) {
-        this.statusItem = this.addStatusBarItem();
-        this.statusItem.addClass('total-sync-last-sync');
-      }
-      this.refreshStatus();
-      this.updateRibbon();
-      this.configureTimer();
-      if (this.config.startup && this.allowed()) void this.sync(false);
-    });
+    this.addCommand({ id: 'stop-sync', name: t('Stop sync', 'Остановить синхронизацию'), callback: () => this.stopSync() });
+  }
+
+  openUpdates(): void {
+    if (this.working) { new Notice(errorText('busy')); return; }
+    window.open('obsidian://show-plugin?id=total-sync');
   }
 
   onunload(): void {
@@ -167,12 +196,17 @@ export default class TotalSync extends Plugin {
     window.localStorage.setItem(key, this.config.device);
   }
 
-  credentials(): Credential | null {
+  private credentialKey(): string { return 'total-sync-dav-' + this.config.device; }
+
+  credentials(endpoint = this.config.endpoint): Credential | null {
     try {
-      const stored = this.app.secretStorage.getSecret(secretKey);
+      const stored = this.app.secretStorage.getSecret(this.credentialKey());
       const data: unknown = stored ? JSON.parse(stored) : null;
-      if (object(data) && typeof data.login === 'string' && typeof data.password === 'string' && data.password) {
-        return { login: data.login, password: data.password };
+      if (object(data) && data.endpoint === webdavEndpoint(endpoint) && object(data.credential)) {
+        const credential = data.credential;
+        if (typeof credential.login === 'string' && typeof credential.password === 'string' && credential.password) {
+          return { login: credential.login, password: credential.password };
+        }
       }
     } catch {
       // An invalid local credential is presented as missing.
@@ -181,14 +215,15 @@ export default class TotalSync extends Plugin {
   }
 
   private dav(endpoint: string, credential: Credential): WebDav {
-    return new WebDav(mailEndpoint(endpoint), credential.login, credential.password, request,
+    return new WebDav(webdavEndpoint(endpoint), credential.login, credential.password, request,
       (text, url) => collectionResponse(new DOMParser().parseFromString(text, 'application/xml'), url));
   }
 
-  private credential(login: string, password: string): Credential {
-    const stored = this.credentials();
+  private credential(endpoint: string, login: string, password: string): Credential {
+    if (this.config.binding && webdavEndpoint(endpoint) !== this.config.endpoint) throw new SyncError('identity');
+    const stored = this.credentials(endpoint);
     const trimmed = login.trim();
-    if (this.config.binding && stored && stored.login.toLowerCase() !== trimmed.toLowerCase()) throw new SyncError('identity');
+    if (this.config.binding && (!stored || stored.login !== trimmed)) throw new SyncError('identity');
     const result = { login: trimmed, password: password || (stored?.login === trimmed ? stored.password : '') };
     if (!result.login || !result.password) throw new SyncError('configuration');
     return result;
@@ -196,13 +231,14 @@ export default class TotalSync extends Plugin {
 
   async verifyConnection(endpoint: string, login: string, password: string): Promise<void> {
     await this.operate(async () => {
-      const credential = this.credential(login, password);
+      endpoint = webdavEndpoint(endpoint);
+      const credential = this.credential(endpoint, login, password);
       const result = await RemoteVault.probe(this.dav(endpoint, credential));
-      this.app.secretStorage.setSecret(secretKey, JSON.stringify(credential));
+      this.app.secretStorage.setSecret(this.credentialKey(), JSON.stringify({ endpoint, credential }));
       this.pluginService = undefined;
-      this.update({ exclusiveMove: result.exclusiveMove });
+      this.update({ endpoint, exclusiveMove: result.exclusiveMove });
       this.record(result.exclusiveMove ? 'probe-exclusive-move' : result.move ? 'probe-move' : 'probe');
-      new Notice(t('WebDAV verified. App password saved locally.', 'WebDAV проверен. Пароль приложения сохранён локально.'));
+      new Notice(t('WebDAV verified. Password saved locally.', 'WebDAV проверен. Пароль сохранён локально.'));
     });
   }
 
@@ -212,7 +248,8 @@ export default class TotalSync extends Plugin {
       const claimKey = 'total-sync-claim-' + binding;
       const existingClaim = window.localStorage.getItem(claimKey);
       if (existingClaim && existingClaim !== this.config.device) throw new SyncError('identity');
-      const credential = this.credential(login, password);
+      endpoint = webdavEndpoint(endpoint);
+      const credential = this.credential(endpoint, login, password);
       const dav = this.dav(endpoint, credential);
       const probe = await RemoteVault.probe(dav);
       const remote = new RemoteVault(dav, binding);
@@ -220,12 +257,12 @@ export default class TotalSync extends Plugin {
       if (this.stopped) throw new SyncError('inactive');
       const next = newState();
       next.checkpoint = { revision: head.revision, hash: head.hash };
-      this.app.secretStorage.setSecret(secretKey, JSON.stringify(credential));
-      await this.saveData({ binding, device: this.config.device, state: next, lastSuccess: null });
+      this.app.secretStorage.setSecret(this.credentialKey(), JSON.stringify({ endpoint, credential }));
+      await this.saveData({ endpoint, binding, device: this.config.device, state: next, lastSuccess: null });
       this.claim(binding);
       this.state = next;
       this.devices = head.manifest.devices;
-      this.update({ binding, enabled: false, exclusiveMove: probe.exclusiveMove });
+      this.update({ endpoint, binding, enabled: false, exclusiveMove: probe.exclusiveMove });
       this.record(create ? 'created' : 'joined');
       new Notice(t('Vault connected. Review the sync plan before enabling sync.', 'Хранилище подключено. Перед включением синхронизации проверьте план.'));
     });
@@ -234,22 +271,34 @@ export default class TotalSync extends Plugin {
   async disconnect(): Promise<void> {
     await this.operate(async () => {
       const key = 'total-sync-claim-' + this.config.binding;
+      const credentialKey = this.credentialKey();
+      // Stop scheduling before clearing checkpoints. Keep abandoned journals scoped to the old identity.
+      this.update({ enabled: false });
       await this.saveData(null);
       if (window.localStorage.getItem(key) === this.config.device) window.localStorage.removeItem(key);
-      this.update({ binding: '', enabled: false });
-      this.app.secretStorage.setSecret(secretKey, '');
+      this.update({ binding: '', device: crypto.randomUUID(), enabled: false, plugins: false, exclusiveMove: false });
+      this.app.secretStorage.setSecret(credentialKey, '');
+      this.pluginService = undefined;
+      this.pluginServiceKey = '';
+      this.pluginWatchStamp = '';
+      this.changedWhileWorking = false;
       this.state = newState();
       this.stateError = false;
       this.lastSuccess = null;
       this.devices = {};
+      this.feedback?.reset();
       this.record('disconnected');
     });
   }
 
   update(change: Partial<Options>): void {
     const value = options({ ...this.config, ...change });
+    if (this.config.binding && value.endpoint !== this.config.endpoint) throw new SyncError('identity');
+    const languageChanged = value.language !== this.config.language;
     this.app.saveLocalStorage(storageKey, value);
     this.config = value;
+    setInterfaceLanguage(value.language);
+    if (languageChanged) { this.registerCommands(); this.feedback?.clear(); }
     if (!value.enabled) {
       window.clearTimeout(this.debounceTimer);
       this.debounceTimer = undefined;
@@ -257,6 +306,7 @@ export default class TotalSync extends Plugin {
     }
     this.updateRibbon();
     this.configureTimer();
+    this.refreshStatus();
   }
 
   private updateRibbon(): void {
@@ -268,7 +318,10 @@ export default class TotalSync extends Plugin {
         () => { void this.sync(true); });
       this.ribbon.addClass('total-sync-ribbon');
     }
-    if (this.ribbon) this.ribbon.hidden = !show;
+    if (this.ribbon) {
+      this.ribbon.hidden = !show;
+      this.ribbon.setAttribute('aria-label', t('TotalSync: Sync now', 'TotalSync: Синхронизировать сейчас'));
+    }
   }
 
   setStatusListener(listener?: (lastSync: string, exactTime: string | null) => void): void {
@@ -284,10 +337,9 @@ export default class TotalSync extends Plugin {
     const age = formatSyncAge(this.lastSuccess, Date.now(), locale);
     const exactTime = this.lastSuccess === null ? null : new Date(this.lastSuccess).toLocaleString(locale);
     if (this.statusItem) {
-      this.statusItem.hidden = !this.config.binding;
-      this.statusItem.textContent = age.text;
-      this.statusItem.title = exactTime ?? age.text;
+      this.statusItem.hidden = !this.config.binding && !this.working;
     }
+    this.feedback?.setIdle(age.text, exactTime, this.lastSuccess !== null);
     this.onStatus?.(age.text, exactTime);
     if (age.refreshIn !== null && !activeDocument.hidden && (this.onStatus || this.config.binding)) {
       this.statusTimer = window.setTimeout(() => this.refreshStatus(), age.refreshIn);
@@ -427,7 +479,7 @@ export default class TotalSync extends Plugin {
       } catch (error) { if (error instanceof SyncError) throw error; throw new SyncError('network'); }
     });
     this.pluginService = new PluginSync(new PluginFiles(this.app.vault.adapter, this.app.vault.configDir, runtime,
-      (extra ?? {}) as Record<string, string[]>), new PluginTransfer(this.dav(MAIL, credential), this.config.binding, check),
+      (extra ?? {}) as Record<string, string[]>), new PluginTransfer(this.dav(this.config.endpoint, credential), this.config.binding, check),
     catalog, this.config.binding, this.config.device, {
       read: () => this.app.loadLocalStorage('total-sync-plugin-state-' + scope) as unknown,
       write: value => this.app.saveLocalStorage('total-sync-plugin-state-' + scope, value),
@@ -441,7 +493,7 @@ export default class TotalSync extends Plugin {
     if (this.profile !== 'windows' || !this.config.binding || this.stateError) throw new SyncError('inactive');
     const credential = this.credentials();
     if (!credential) throw new SyncError('configuration');
-    const head = await new RemoteVault(this.dav(MAIL, credential), this.config.binding).head(this.state.checkpoint, true);
+    const head = await new RemoteVault(this.dav(this.config.endpoint, credential), this.config.binding).head(this.state.checkpoint, true);
     this.devices = head.manifest.devices;
     return Object.keys(this.devices).filter(id => this.devices[id] === 'windows');
   }
@@ -468,7 +520,7 @@ export default class TotalSync extends Plugin {
       const code = error instanceof SyncError ? error.code : 'local';
       this.feedback?.finish(code === 'cancelled' ? 'cancelled' : 'error', errorText(code));
       throw error;
-    } finally { this.syncController = undefined; }
+    } finally { this.syncController = undefined; this.refreshStatus(); }
   }
 
   private engine(files = this.files(), controls?: SyncControls): SyncEngine {
@@ -476,7 +528,7 @@ export default class TotalSync extends Plugin {
     const credential = this.credentials();
     if (!credential) throw new SyncError('configuration');
     const key = 'total-sync-publication-v1-' + this.config.binding + '-' + this.config.device;
-    const remote = new RemoteVault(this.dav(MAIL, credential), this.config.binding, this.config.exclusiveMove, {
+    const remote = new RemoteVault(this.dav(this.config.endpoint, credential), this.config.binding, this.config.exclusiveMove, {
       read: () => this.app.loadLocalStorage(key) as unknown,
       write: intent => this.app.saveLocalStorage(key, intent),
     });
@@ -516,7 +568,7 @@ export default class TotalSync extends Plugin {
     return !!await this.operate(async () => {
       if (!this.allowed()) throw new SyncError(this.stateError ? 'integrity' : 'inactive');
       const state = await this.engine().resolveConflict(this.state, review, choice);
-      await this.saveData({ binding: this.config.binding, device: this.config.device, state, lastSuccess: this.lastSuccess });
+      await this.saveData({ endpoint: this.config.endpoint, binding: this.config.binding, device: this.config.device, state, lastSuccess: this.lastSuccess });
       this.state = state;
       this.record('markdown-conflict-resolved');
       new Notice(t('Conflict resolved. The original note has been synced.', 'Конфликт разобран. Исходная заметка синхронизирована.'));
@@ -527,7 +579,7 @@ export default class TotalSync extends Plugin {
   async acceptExcalidraw(): Promise<void> {
     await this.operate(async () => {
       const state = await this.engine().acceptExcalidraw(this.state);
-      await this.saveData({ binding: this.config.binding, device: this.config.device, state, lastSuccess: this.lastSuccess });
+      await this.saveData({ endpoint: this.config.endpoint, binding: this.config.binding, device: this.config.device, state, lastSuccess: this.lastSuccess });
       this.state = state;
       this.record('excalidraw-profile-applied');
       new Notice(t('Excalidraw preferences received. Reopen the vault if its settings panel is stale.',
@@ -554,7 +606,7 @@ export default class TotalSync extends Plugin {
     });
   }
 
-  private stopSync(): void {
+  stopSync(): void {
     const controller = this.syncController;
     if (!controller || controller.signal.aborted) return;
     controller.abort();
@@ -565,6 +617,7 @@ export default class TotalSync extends Plugin {
     this.retryTimer = undefined;
     this.queued = false;
     this.changedWhileWorking = false;
+    this.refreshStatus();
   }
 
   async sync(manual: boolean, approval?: string): Promise<void> {
@@ -586,7 +639,7 @@ export default class TotalSync extends Plugin {
         progress: (completed, total) => this.feedback?.progress(completed, total),
       }).run(this.state, approval);
       // Note checkpoints are durable even if the separate plugin operation subsequently fails.
-      await this.saveData({ binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess: this.lastSuccess });
+      await this.saveData({ endpoint: this.config.endpoint, binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess: this.lastSuccess });
       this.state = result.state;
       this.devices = result.devices;
       // A separate plugin-profile error must not hide a retryable note-sync error.
@@ -600,7 +653,7 @@ export default class TotalSync extends Plugin {
       }
       const complete = result.counts.blocked === 0 && result.counts.review === 0 && result.errors.length === 0;
       const lastSuccess = complete ? Date.now() : this.lastSuccess;
-      await this.saveData({ binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess });
+      await this.saveData({ endpoint: this.config.endpoint, binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess });
       this.lastSuccess = lastSuccess;
       this.state = result.state;
       this.devices = result.devices;
@@ -621,7 +674,7 @@ export default class TotalSync extends Plugin {
         error: complete ? null : this.currentError,
         changed: result.recoveredPublication || n.push + n.pull + n['delete-local'] + n['delete-remote'] + n.conflict > 0,
       };
-    }, false, true).finally(() => { this.syncController = undefined; });
+    }, false, true).finally(() => { this.syncController = undefined; this.refreshStatus(); });
     if (this.stopped) return;
     if (this.suspended) {
       this.feedback?.clear();
@@ -630,12 +683,10 @@ export default class TotalSync extends Plugin {
     const error = outcome ? outcome.error : this.currentError ?? 'local';
     if (error) {
       this.showSyncError(error);
-    } else if (manual || outcome?.changed) {
+    } else {
       const message = t('Sync complete', 'Синхронизация завершена');
       if (this.feedback) this.feedback.finish('success', message);
-      else new Notice(message);
-    } else {
-      this.feedback?.clear();
+      else if (manual) new Notice(message);
     }
   }
 

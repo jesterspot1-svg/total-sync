@@ -11,10 +11,16 @@ export class SyncFeedback {
   private readonly label: HTMLSpanElement;
   private readonly stopButton: HTMLButtonElement;
   private hideTimer?: number;
+  private transient = false;
+  private idleText = '';
+  private idleTitle = '';
+  private idleSuccess = false;
+  private lastResult?: Exclude<State, 'running'>;
+  private lastMessage = '';
 
-  constructor(host: HTMLElement, mobile: boolean, onStop: () => void) {
+  constructor(host: HTMLElement, private readonly mobile: boolean, onStop: () => void) {
     this.container = host.createDiv({
-      cls: mobile ? 'total-sync-feedback total-sync-feedback-mobile' : 'total-sync-feedback',
+      cls: mobile ? 'total-sync-feedback total-sync-feedback-mobile' : 'total-sync-feedback-inline',
       attr: { role: 'status', 'aria-live': 'polite', 'aria-atomic': 'true' },
     });
     this.badge = this.container.createDiv({ cls: 'total-sync-feedback-badge' });
@@ -34,7 +40,15 @@ export class SyncFeedback {
 
   start(): void {
     this.stopButton.disabled = false;
+    this.stopButton.textContent = t('Stop', 'Остановить');
     this.show('running', t('Syncing…', 'Синхронизация…'));
+  }
+
+  setIdle(text: string, exactTime: string | null, success: boolean): void {
+    this.idleText = text;
+    this.idleTitle = exactTime ?? text;
+    this.idleSuccess = success;
+    if (!this.transient) this.renderIdle();
   }
 
   progress(completed: number, total: number): void {
@@ -42,6 +56,7 @@ export class SyncFeedback {
     const prefix = completed === total ? t('Finalizing…', 'Завершение…') : t('Syncing…', 'Синхронизация…');
     const files = total % 10 === 1 && total % 100 !== 11 ? 'файла' : 'файлов';
     this.label.textContent = prefix + ' ' + t(`${completed} of ${total} ${total === 1 ? 'file' : 'files'}`, `${completed} из ${total} ${files}`);
+    this.badge.title = this.label.textContent;
   }
 
   stopping(): void {
@@ -51,24 +66,46 @@ export class SyncFeedback {
   }
 
   finish(state: Exclude<State, 'running'>, text: string): void {
+    this.lastResult = state;
+    this.lastMessage = text;
     this.show(state, text);
     this.hideTimer = window.setTimeout(() => this.clear(), state === 'error' ? 7000 : 3500);
   }
 
   private show(state: State, text: string): void {
+    this.transient = true;
     window.clearTimeout(this.hideTimer);
     this.badge.dataset.state = state;
     setIcon(this.icon, icons[state]);
     this.badge.hidden = false;
     this.stopButton.hidden = state !== 'running';
     this.label.textContent = text;
+    this.badge.title = text;
   }
 
   clear(): void {
     window.clearTimeout(this.hideTimer);
     this.hideTimer = undefined;
-    this.badge.hidden = true;
-    this.label.textContent = '';
+    this.transient = false;
+    this.renderIdle();
+  }
+
+  reset(): void {
+    this.lastResult = undefined;
+    this.lastMessage = '';
+    this.idleSuccess = false;
+    this.clear();
+  }
+
+  private renderIdle(): void {
+    this.badge.hidden = this.mobile;
+    this.stopButton.hidden = true;
+    if (this.mobile) { this.label.textContent = ''; return; }
+    const state = this.lastResult ?? (this.idleSuccess ? 'success' : undefined);
+    this.badge.dataset.state = state ?? 'idle';
+    setIcon(this.icon, state ? icons[state] : 'clock');
+    this.label.textContent = this.idleText;
+    this.badge.title = [state === 'error' || state === 'cancelled' ? this.lastMessage : '', this.idleTitle].filter(Boolean).join('\n');
   }
 
   dispose(): void {

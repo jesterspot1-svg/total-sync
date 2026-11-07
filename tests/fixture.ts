@@ -25,7 +25,7 @@ export class DavServer {
 
   constructor() {
     this.server = createServer(async (request, response) => {
-      const path = request.url ?? '/';
+      const path = (request.url ?? '/').replace(/\/+$/, '') || '/';
       const method = request.method ?? '';
       this.requests.push({ method, path });
       const send = (status: number, body?: string | Uint8Array) => {
@@ -121,18 +121,18 @@ export class DavServer {
     this.server.close();
   }
 
-  dav(timeout = 5000, delay = 0): WebDav {
+  dav(timeout = 5000, delay = 0, endpoint = MAIL): WebDav {
     const send = async (request: Request) => {
       if (this.offline) throw new Error('Synthetic disconnected network');
       if (delay) await new Promise(resolve => setTimeout(resolve, delay));
       const url = new URL(request.url);
-      if (url.origin !== MAIL) throw new Error('Non-fixture origin');
+      if (url.origin !== new URL(endpoint).origin) throw new Error('Non-fixture origin');
       const result = await fetch(this.origin + url.pathname, {
         method: request.method, headers: request.headers, body: request.body, redirect: 'error',
       });
       return { status: result.status, bytes: await result.arrayBuffer(), date: result.headers.get('date') ?? undefined };
     };
-    return new WebDav(MAIL, 'tester@example.com', 'synthetic-fixture', send, (value, url) => {
+    return new WebDav(endpoint, 'tester@example.com', 'synthetic-fixture', send, (value, url) => {
       const document = new DOMParser({ onError: () => { throw new Error('Malformed XML'); } }).parseFromString(value, 'application/xml');
       return collectionResponse(document as unknown as Document, url);
     }, timeout);
@@ -215,9 +215,10 @@ export class Client {
   constructor(
     server: DavServer, id: string, profile: Profile = 'windows', maxBytes = 8 * 1024 * 1024,
     exclusiveMove = false, excalidraw = false, controls?: SyncControls, journal?: LegacyJournal, device: string = crypto.randomUUID(),
+    endpoint = MAIL,
   ) {
     this.device = device;
-    const remote = new RemoteVault(server.dav(), id, exclusiveMove, journal);
+    const remote = new RemoteVault(server.dav(5000, 0, endpoint), id, exclusiveMove, journal);
     this.engine = new SyncEngine(remote, this.local, {
       device: this.device, profile, maxBytes, active: () => true, now: () => server.clock,
       controls,

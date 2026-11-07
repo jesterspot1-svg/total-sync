@@ -1,9 +1,9 @@
 {
   "id": "total-sync",
   "name": "TotalSync",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "minAppVersion": "1.11.5",
-  "description": "Sync notes, attachments and selected vault settings with Mail Cloud WebDAV.",
+  "description": "Sync your notes, files and settings across devices with your own WebDAV server.",
   "author": "jesterspot1-svg",
   "authorUrl": "https://github.com/jesterspot1-svg",
   "isDesktopOnly": false

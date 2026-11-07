@@ -7,7 +7,7 @@ import {
   catalogInstallCommand, checkPayload, EXCALIDRAW_ID, EXCALIDRAW_PROFILE, excalidrawPreferences,
   inChannel, jsonBytes, mergePreferences, pathKey, portablePath,
 } from '../src/policy';
-import { MAIL, mailEndpoint, ROOT } from '../src/webdav';
+import { MAIL, webdavEndpoint, ROOT } from '../src/webdav';
 
 const fails = (code: string) => (error: unknown) => error instanceof SyncError && error.code === code;
 
@@ -37,9 +37,9 @@ test('connection probe verifies access, exclusive MKCOL, binary, DELETE and opti
   server.move = false;
   assert.deepEqual(await RemoteVault.probe(server.dav()), { move: false, exclusiveMove: false });
   assert.equal([...server.folders].some(path => path.includes('probe-')), false);
-  assert.equal(mailEndpoint(MAIL + '/'), MAIL);
-  for (const bad of ['http://webdav.cloud.mail.ru', 'https://example.com', MAIL + '/something', MAIL + '?x=1']) {
-    assert.throws(() => mailEndpoint(bad), fails('configuration'));
+  assert.equal(webdavEndpoint(MAIL + '/'), MAIL);
+  for (const bad of ['http://webdav.cloud.mail.ru', 'file:///tmp/cloud', MAIL + '?x=1', MAIL + '#fragment', MAIL + '/%2f', MAIL + '/%ZZ']) {
+    assert.throws(() => webdavEndpoint(bad), fails('configuration'));
   }
 });
 

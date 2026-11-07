@@ -1,8 +1,8 @@
 {
   "name": "total-sync",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "Obsidian vault sync using Mail Cloud WebDAV",
+  "description": "Obsidian notes, files and settings sync through WebDAV",
   "license": "MIT",
   "scripts": {
     "typecheck": "tsc --noEmit",

@@ -2,16 +2,18 @@ import { getLanguage } from 'obsidian';
 import type { SyncError } from './model';
 import type { Locale } from './sync-age';
 
-export const interfaceLocale = (): Locale => /^ru(?:-|$)/i.test(getLanguage()) ? 'ru' : 'en';
+let language: 'auto' | Locale = 'auto';
+export const setInterfaceLanguage = (value: typeof language): void => { language = value; };
+export const interfaceLocale = (): Locale => language === 'auto' ? (/^ru(?:-|$)/i.test(getLanguage()) ? 'ru' : 'en') : language;
 export const t = (en: string, ru: string): string => interfaceLocale() === 'ru' ? ru : en;
 
 export function errorText(code: SyncError['code']): string {
   const messages: Record<SyncError['code'], [string, string]> = {
-    auth: ['Mail rejected the login or app password.', 'Mail отклонил логин или пароль приложения.'],
-    forbidden: ['Mail denied access. Check the app password permissions.', 'Mail отказал в доступе. Проверьте права пароля приложения.'],
+    auth: ['The WebDAV server rejected the login or password.', 'Сервер WebDAV отклонил логин или пароль.'],
+    forbidden: ['The WebDAV server denied access. Check the account permissions.', 'Сервер WebDAV отказал в доступе. Проверьте права аккаунта.'],
     missing: ['The vault or an expected object is missing. Verify the vault ID and cloud folder.', 'Хранилище или ожидаемый объект отсутствует. Проверьте ID и папку в облаке.'],
-    rate: ['Mail is rate-limiting requests. TotalSync will retry.', 'Mail ограничил частоту запросов. TotalSync повторит попытку.'],
-    server: ['Mail returned a server error.', 'Mail вернул ошибку сервера.'],
+    rate: ['The server is rate-limiting requests. TotalSync will retry.', 'Сервер ограничил частоту запросов. TotalSync повторит попытку.'],
+    server: ['The WebDAV server returned an error.', 'Сервер WebDAV вернул ошибку.'],
     network: ['The WebDAV request failed. Check your connection.', 'Запрос WebDAV не удался. Проверьте интернет.'],
     timeout: ['The server took too long to respond.', 'Сервер не успел ответить.'],
     uncertain: ['A cloud write could not be confirmed. Recovery must verify its result before publishing more changes.', 'Запись в облако не подтверждена. Перед следующей публикацией нужно проверить её результат.'],

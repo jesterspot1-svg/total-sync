@@ -6,7 +6,6 @@ import type { MergePart } from './markdown-merge';
 import type { Action } from './planner';
 import { catalogInstallCommand } from './policy';
 import type { Options } from './settings';
-import { MAIL } from './webdav';
 import { showPluginProfiles } from './plugin-ui';
 
 const project = 'https://github.com/jesterspot1-svg/total-sync';
@@ -337,16 +336,48 @@ export class SettingsTab extends PluginSettingTab {
     const el = this.containerEl;
     const plugin = this.plugin;
     el.empty();
-    new Setting(el).setName(t('Mail WebDAV connection', 'Подключение к WebDAV Mail')).setHeading();
-    let endpoint = MAIL;
+    el.addClass('total-sync-settings');
+    new Setting(el).setName('TotalSync ' + plugin.manifest.version).setHeading();
+    new Setting(el).setName('Language / Язык').addDropdown(control => control
+      .addOption('auto', t('Same as Obsidian', 'Как в Obsidian')).addOption('ru', 'Русский').addOption('en', 'English')
+      .setValue(plugin.config.language).onChange(value => {
+        if (plugin.working) { control.setValue(plugin.config.language); new Notice(errorText('busy')); return; }
+        if (value !== 'auto' && value !== 'ru' && value !== 'en') return;
+        plugin.update({ language: value });
+        this.display();
+      }));
+    new Setting(el).setName(t('Plugin updates', 'Обновления плагина')).setDesc(t(
+      'Open TotalSync in Obsidian’s plugin catalog to check the available version and install an update.',
+      'Откроется карточка TotalSync в каталоге Obsidian. Там можно проверить доступную версию и установить обновление.',
+    )).addButton(btn => btn.setButtonText(t('Check and update', 'Проверить и обновить')).onClick(() => plugin.openUpdates()));
+    new Setting(el).setName(t('WebDAV connection', 'Подключение WebDAV')).setHeading();
+    new Setting(el).setName(plugin.config.binding ? t('Connected', 'Подключено') : t('Start here', 'Начните здесь'))
+      .setDesc(plugin.config.binding ? t(
+        'To change the address or login, disconnect below first. Your notes and cloud files will stay in place.',
+        'Чтобы изменить адрес или логин, сначала нажмите «Сменить сервер или аккаунт». Заметки и файлы в облаке сохранятся.',
+      ) : t(
+        '1. Enter your WebDAV address and account. 2. Check the connection. 3. Create a cloud vault, or join using an existing ID.',
+        '1. Укажите адрес WebDAV и данные входа. 2. Проверьте подключение. 3. Создайте облачное хранилище или подключитесь по готовому ID.',
+      ));
+    if (plugin.config.binding) {
+      buttonRow(el).addButton(btn => btn.setButtonText(t('Change server or account', 'Сменить сервер или аккаунт'))
+        .onClick(() => confirm(plugin.app, t('Change WebDAV connection', 'Сменить подключение WebDAV'), t(
+          'Sync will be paused and this local connection will be reset. Notes and files in the old cloud will stay in place. Enter the new server and account next, then create a new cloud vault or join its ID. Plugin profiles must be connected again for the new cloud.',
+          'Синхронизация будет выключена, текущая локальная привязка сброшена. Заметки и файлы в прежнем облаке сохранятся. Затем укажите новый сервер и аккаунт, создайте новое облачное хранилище или подключитесь по его ID. Профили плагинов для нового облака подключаются заново.',
+        ), t('Disconnect and change', 'Отключить и изменить'), async () => { await plugin.disconnect(); this.display(); })));
+    }
+    let endpoint = plugin.config.endpoint;
     let login = plugin.credentials()?.login ?? '';
     let password = '';
     let clearPassword = () => { password = ''; };
-    new Setting(el).setName(t('WebDAV URL', 'Адрес WebDAV')).addText(text =>
-      text.setValue(endpoint).setDisabled(!!plugin.config.binding).onChange(value => { endpoint = value; }));
-    new Setting(el).setName(t('Mail login', 'Логин Mail')).addText(text =>
-      text.setPlaceholder('name@example.com').setValue(login).setDisabled(!!plugin.config.binding).onChange(value => { login = value; }));
-    new Setting(el).setName(t('App password', 'Пароль приложения'))
+    new Setting(el).setName(t('WebDAV URL', 'Адрес WebDAV')).setDesc(t(
+      'Use the full HTTPS WebDAV address, including the folder path if your provider requires it. The folder must already exist.',
+      'Полный адрес WebDAV по HTTPS, включая путь к папке, если он нужен провайдеру. Эта папка должна существовать.',
+    )).addText(text => text.setPlaceholder('https://cloud.example.com/dav/').setValue(endpoint)
+      .setDisabled(!!plugin.config.binding).onChange(value => { endpoint = value; clearPassword(); }));
+    new Setting(el).setName(t('Login', 'Логин')).addText(text =>
+      text.setPlaceholder(t('Account name', 'Имя аккаунта')).setValue(login).setDisabled(!!plugin.config.binding).onChange(value => { login = value; clearPassword(); }));
+    new Setting(el).setName(t('Password or app password', 'Пароль или пароль приложения'))
       .setDesc(t('Stored with Obsidian SecretStorage on this device.', 'Сохраняется в SecretStorage Obsidian на этом устройстве.'))
       .addText(text => {
         text.inputEl.type = 'password';
@@ -394,14 +425,6 @@ export class SettingsTab extends PluginSettingTab {
             if (plugin.config.binding) this.display();
           },
         )));
-    } else {
-      buttonRow(el, t('Disconnect this vault', 'Отключить это хранилище'))
-        .addButton(btn => btn.setButtonText(t('Disconnect', 'Отключить')).onClick(() => confirm(
-          plugin.app, t('Disconnect this vault', 'Отключить это хранилище'),
-          t('Clears the local sync checkpoint and saved login. Existing vault files and cloud data are kept.',
-            'Локальная точка синхронизации и сохранённый вход будут очищены. Файлы хранилища и данные в облаке сохранятся.'),
-          t('Disconnect', 'Отключить'), async () => { await plugin.disconnect(); this.display(); },
-        )));
     }
     const devices = new Setting(el).setName(t('Registered devices', 'Зарегистрированные устройства'));
     new Setting(el).setName(t('Sync', 'Синхронизация')).setHeading();
@@ -420,6 +443,11 @@ export class SettingsTab extends PluginSettingTab {
     buttonRow(el).addButton(btn => btn.setButtonText(t('Sync now', 'Синхронизировать сейчас')).onClick(() => plugin.sync(true)))
       .addButton(btn => btn.setButtonText(t('Show sync plan', 'Показать план операций')).onClick(() => showPlan(plugin)))
       .addButton(btn => btn.setButtonText(t('Resolve conflicts', 'Разобрать конфликты')).onClick(() => showMarkdownConflicts(plugin)));
+    let updateStop = () => {};
+    new Setting(el).setName(t('Stop the current sync', 'Остановить текущую синхронизацию')).addButton(btn => {
+      btn.setButtonText(t('Stop', 'Остановить')).onClick(() => plugin.stopSync());
+      updateStop = () => { btn.setDisabled(!plugin.canStop); };
+    });
 
     new Setting(el).setName(t('Data channels', 'Области данных')).setHeading();
     this.toggle('content', 'Content', 'Контент', ['Notes and folders.', 'Заметки и папки.']);
@@ -484,6 +512,7 @@ export class SettingsTab extends PluginSettingTab {
     help.createEl('a', { text: 'GitHub Issues', href: project + '/issues' });
 
     const refresh = (lastSync: string, exactTime: string | null) => {
+      updateStop();
       devices.setDesc(Object.entries(plugin.devices).map(([uuid, profile]) => profileName(profile) + ' · ' + uuid.slice(0, 8)).join(', ') || '—');
       const state = plugin.working ? t('Working', 'Выполняется') : plugin.queued ? t('Queued', 'В очереди')
         : plugin.config.enabled ? t('Ready', 'Готово') : t('Paused', 'Приостановлено');

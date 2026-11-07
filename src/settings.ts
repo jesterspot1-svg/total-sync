@@ -1,7 +1,10 @@
 import { idPattern, object, SyncError } from './model';
 import { pathKey, portablePath } from './policy';
+import { MAIL, webdavEndpoint } from './webdav';
 
 export interface Options {
+  language: 'auto' | 'en' | 'ru';
+  endpoint: string;
   exclusiveMove: boolean;
   binding: string;
   device: string;
@@ -39,6 +42,8 @@ export function options(data: unknown): Options {
   const exclude = typeof stored.exclude === 'string' ? stored.exclude : '';
   prefixes(exclude);
   return {
+    language: stored.language === 'en' || stored.language === 'ru' ? stored.language : 'auto',
+    endpoint: webdavEndpoint(typeof stored.endpoint === 'string' ? stored.endpoint : MAIL),
     exclusiveMove: bool('exclusiveMove', false),
     binding, device: typeof stored.device === 'string' && idPattern.test(stored.device) ? stored.device : crypto.randomUUID(),
     enabled: bool('enabled', false), ribbonButton: bool('ribbonButton', false),

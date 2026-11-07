@@ -12,6 +12,7 @@ class Element {
   hidden = false;
   addEventListener(name, callback) { this[name] = callback; }
   appendText() {}
+  setAttribute(name, value) { this[name] = value; }
   setText(text) { this.text = text; }
   empty() { this.children = []; }
   addClass(cls) { this.cls = [this.cls, cls].filter(Boolean).join(' '); }
@@ -30,6 +31,7 @@ class Element {
 
 class Control {
   inputEl = new Element();
+  addOption() { return this; }
   setValue(value) { this.value = value; return this; }
   setDisabled(value) { this.disabled = value; return this; }
   setPlaceholder() { return this; }
@@ -56,6 +58,7 @@ class Setting {
     return this;
   }
   addButton(init) { return this.add(init); }
+  addDropdown(init) { return this.add(init); }
   addText(init) { return this.add(init); }
   addToggle(init) { return this.add(init); }
   addTextArea(init) { return this.add(init); }
@@ -64,6 +67,8 @@ class Setting {
 for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr', true, false, 32], ['fr', true, true, Infinity]]) {
   const stored = new Map();
   const claims = new Map();
+  const legacyCredential = JSON.stringify({ login: 'fixture@example.com', password: 'synthetic' });
+  const secrets = new Map([['total-sync-mail-webdav', legacyCredential]]);
   const body = new Element();
   const ribbon = new Element();
   const statusBar = new Element();
@@ -72,7 +77,9 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   let now = 1_800_000_000_000;
   let savedData = null;
   let timerId = 0;
+  const opened = [];
   const window = {
+    open: url => opened.push(url),
     localStorage: { getItem: key => claims.get(key), setItem: (key, value) => claims.set(key, value), removeItem: key => claims.delete(key) },
     setTimeout(callback, delay) {
       const id = ++timerId;
@@ -88,7 +95,7 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
     saveLocalStorage: (key, data) => stored.set(key, data),
     vault: { on() {}, getName: () => 'TotalSync-Beta' },
     workspace: { onLayoutReady: callback => callback() },
-    secretStorage: { getSecret: () => null },
+    secretStorage: { getSecret: key => secrets.get(key), setSecret: (key, value) => secrets.set(key, value) },
   };
   const api = {
     App: class {},
@@ -107,7 +114,8 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
       async loadData() { return savedData; }
       async saveData(value) { savedData = value; }
       addSettingTab(tab) { this.tab = tab; }
-      addCommand(command) { this.commands.push(command); }
+      addCommand(command) { this.commands.push(command); return command; }
+      removeCommand(id) { this.commands = this.commands.filter(c => c.id !== id); }
       addRibbonIcon(icon, title, activate) { return ribbon.createEl('button', { icon, title, activate }); }
       addStatusBarItem() { return statusBar.createDiv(); }
       registerDomEvent() {}
@@ -133,17 +141,31 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
     localStorage: { getItem: key => claims.get(key), setItem: (key, value) => claims.set(key, value) },
     crypto: globalThis.crypto,
     AbortController,
+    URL,
     TextDecoder,
     TextEncoder,
     atob, btoa, structuredClone,
   }, { filename: 'dist/main.js' });
   const plugin = new module.exports.default();
   await plugin.onload();
+  assert.equal(plugin.credentials().login, 'fixture@example.com');
+  assert.equal(secrets.get('total-sync-mail-webdav'), legacyCredential, 'Migrating one vault must not clear another vault’s legacy credential');
+  assert.equal(plugin.credentials('https://different.example.com/dav'), null, 'Passwords must not follow an edited URL');
+  assert.ok(secrets.has('total-sync-dav-' + plugin.config.device));
   plugin.tab.display();
+  plugin.tab.containerEl.children.find(row => row.name === 'Language / Язык').controls[0].change('en');
+  assert.ok(plugin.tab.containerEl.children.some(row => row.name === 'WebDAV connection'));
+  plugin.tab.containerEl.children.find(row => row.name === 'Language / Язык').controls[0].change('ru');
+  assert.ok(plugin.tab.containerEl.children.some(row => row.name === 'Подключение WebDAV'));
+  assert.equal(plugin.commands.find(command => command.id === 'sync-now').name, 'Синхронизировать сейчас');
+  assert.equal(new Set(plugin.commands.map(command => command.id)).size, plugin.commands.length);
+  plugin.tab.containerEl.children.find(row => row.name === 'Language / Язык').controls[0].change('auto');
+  plugin.openUpdates();
+  assert.deepEqual(opened, ['obsidian://show-plugin?id=total-sync']);
   const all = plugin.tab.containerEl.children;
   const labels = all.map(row => row.name);
   const status = all.find(row => row.name === (mobile ? 'Status' : 'Состояние'));
-  const syncAgeText = mobile ? () => status.description : () => statusBar.children[0].textContent;
+  const syncAgeText = () => status.description;
   const justNow = mobile ? 'Successfully synced just now' : 'Синхронизация была сейчас';
   const minuteAgo = mobile ? 'Successfully synced 1 minute ago' : 'Синхронизация была 1 мин назад';
   const tick = delay => {
@@ -154,13 +176,13 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   assert.equal(statusBar.children.length, mobile ? 0 : 1);
   if (!mobile) assert.equal(statusBar.children[0].hidden, true);
   assert.ok(labels.includes('TotalSync-Beta'));
-  assert.ok(labels.includes(mobile ? 'Mail WebDAV connection' : 'Подключение к WebDAV Mail'));
+  assert.ok(labels.includes(mobile ? 'WebDAV connection' : 'Подключение WebDAV'));
   assert.equal(labels.includes('Настройки Windows'), !mobile);
   assert.equal(labels.includes('Windows settings'), false);
   const attachments = all.find(row => row.name === (mobile ? 'Attachments' : 'Вложения'));
   assert.equal(plugin.maxBytes, maxMiB * 1024 * 1024);
   assert.ok(attachments.description.includes(ios ? 'does not cap file size' : String(maxMiB)));
-  const password = all.find(row => row.name === (mobile ? 'App password' : 'Пароль приложения'));
+  const password = all.find(row => row.name === (mobile ? 'Password or app password' : 'Пароль или пароль приложения'));
   assert.equal(password.controls[0].inputEl.type, 'password');
   assert.equal(plugin.config.enabled, false);
   assert.equal(plugin.config.binding, '');
@@ -217,13 +239,14 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   assert.deepEqual({ ...resolution }, { kind: 'remote' });
   assert.equal(largeEditor.closed, true);
   plugin.pendingConflicts = pendingConflicts;
-  const indicator = body.children.find(node => node.cls?.includes('total-sync-feedback'));
+  const indicator = mobile ? body.children.find(node => node.cls?.includes('total-sync-feedback')) : statusBar.children[0].children[0];
+  if (!mobile) assert.equal(body.children.length, 0, 'Desktop feedback belongs in the status bar, with no floating badge');
   const badge = indicator.children[0];
   const [icon, text, stop] = badge.children;
   assert.equal(indicator.attr.role, 'status');
   assert.equal(indicator.cls.includes('-mobile'), mobile);
   assert.equal(icon.attr['aria-hidden'], 'true');
-  assert.equal(badge.hidden, true);
+  assert.equal(badge.hidden, mobile);
   const ribbonSetting = all.find(row => row.name === 'Кнопка синхронизации в левой панели');
   assert.equal(!!ribbonSetting, !mobile);
   assert.equal(labels.includes('Mobile quick access'), mobile);
@@ -252,7 +275,7 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   plugin.update({ binding: globalThis.crypto.randomUUID(), enabled: true, interval: 0 });
   assert.equal(ribbon.children.length, 1);
   if (!mobile) {
-    const secrets = new Map([['total-sync-mail-webdav', JSON.stringify({ login: 'fixture@example.com', password: 'synthetic' })]]);
+    secrets.set('total-sync-dav-' + plugin.config.device, JSON.stringify({ endpoint: plugin.config.endpoint, credential: { login: 'fixture@example.com', password: 'synthetic' } }));
     let secretUnavailable = false;
     mockApp.secretStorage = {
       getSecret: key => secrets.get(key),
@@ -325,12 +348,17 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   const count = { push: 1, pull: 0, 'delete-local': 0, 'delete-remote': 0, conflict: 0, review: 0, equal: 0, blocked: 0 };
   const success = { counts: count, errors: [], devices: {}, desktopChanged: false, merged: 0, newConflicts: 0 };
   const inProgress = plugin.sync(true);
+  const connectedIdentity = plugin.config.device;
+  await plugin.disconnect();
+  assert.equal(plugin.config.device, connectedIdentity, 'Changing connection must wait for an active sync');
+  plugin.openUpdates();
+  assert.equal(opened.length, 1, 'Do not offer installation while a sync is active');
   assert.equal(badge.dataset.state, 'running');
   assert.equal(badge.hidden, false);
   assert.equal(icon.icon, 'refresh-cw');
   assert.equal(text.textContent, mobile ? 'Syncing…' : 'Синхронизация…');
   assert.equal(stop.hidden, false);
-  assert.equal(stop.text, mobile ? 'Stop' : 'Остановить');
+  assert.equal(stop.textContent, mobile ? 'Stop' : 'Остановить');
   controls.progress(0, 2);
   assert.equal(text.textContent, mobile ? 'Syncing… 0 of 2 files' : 'Синхронизация… 0 из 2 файлов');
   controls.progress(1, 2);
@@ -348,7 +376,7 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   assert.ok(syncAgeText().includes(justNow));
   if (!mobile) assert.equal(statusBar.children[0].hidden, false);
   tick(3500);
-  assert.equal(badge.hidden, true);
+  assert.equal(badge.hidden, mobile);
   now += 60_000;
   tick(60_000);
   assert.ok(syncAgeText().includes(minuteAgo));
@@ -358,7 +386,10 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   assert.equal(text.textContent, mobile ? 'Syncing…' : 'Синхронизация…');
   resolve({ ...success, counts: { ...count, push: 0 } });
   await idle;
-  assert.equal(badge.hidden, true);
+  assert.equal(badge.hidden, false);
+  assert.equal(icon.icon, 'check', 'An automatic sync with no changes still confirms success');
+  tick(3500);
+  assert.equal(badge.hidden, mobile);
   assert.ok(syncAgeText().includes(justNow));
   const lastSuccessfulTime = savedData.lastSuccess;
   now += 60_000;
@@ -443,6 +474,23 @@ for (const [language, mobile, ios, maxMiB] of [['ru', false, false, 128], ['fr',
   restarted.tab.display();
   const restoredStatus = restarted.tab.containerEl.children.find(row => row.name === (mobile ? 'Status' : 'Состояние'));
   assert.ok(restoredStatus.description.includes(minuteAgo));
+  assert.throws(() => restarted.update({ endpoint: 'https://different.example.com/dav' }), 'A bound endpoint cannot be silently replaced');
+  const previousIdentity = restarted.config.device;
+  // Ensure the unrelated startup run has settled before intentionally disconnecting this synthetic vault.
+  restarted.update({ enabled: false });
+  for (let i = 0; restarted.working && i < 100; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  await restarted.disconnect();
+  assert.equal(restarted.config.binding, '');
+  assert.equal(restarted.config.enabled, false);
+  assert.equal(restarted.config.plugins, false);
+  assert.notEqual(restarted.config.device, previousIdentity, 'New connections must not reuse old plugin trust, checkpoints or publication journals');
+  assert.equal(restarted.credentials(), null);
+  assert.equal(secrets.get('total-sync-dav-' + previousIdentity), '');
+  assert.equal(secrets.get('total-sync-mail-webdav'), legacyCredential);
+  assert.equal(savedData, null);
+  restarted.update({ endpoint: 'https://different.example.com/dav' });
+  assert.equal(restarted.config.endpoint, 'https://different.example.com/dav');
+  assert.equal(restarted.credentials(), null);
   restarted.tab.hide();
   restarted.onunload();
   assert.equal(timers.size, 0);

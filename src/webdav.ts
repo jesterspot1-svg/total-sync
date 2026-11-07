@@ -19,9 +19,17 @@ export interface Response {
 export type Transport = (request: Request) => Promise<Response>;
 export type DavParser = (text: string, url: string) => boolean;
 
-export function mailEndpoint(value: string): string {
-  if (value.trim() !== MAIL && value.trim() !== MAIL + '/') throw new SyncError('configuration');
-  return MAIL;
+export function webdavEndpoint(value: string): string {
+  try {
+    const input = value.trim();
+    if (!input || /[\r\n\t\\]/.test(input)) throw new Error();
+    const url = new URL(input);
+    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.search || url.hash) throw new Error();
+    // Validate escaping before appending our own paths. Keep provider-specific prefixes, ports and Unicode.
+    const path = decodeURIComponent(url.pathname);
+    if (path.includes('\\') || [...path].some(char => char.charCodeAt(0) < 32) || /%2f|%5c/i.test(url.pathname)) throw new Error();
+    return url.origin + url.pathname.replace(/\/+$/, '');
+  } catch { throw new SyncError('configuration'); }
 }
 
 export function collectionResponse(doc: Document, url: string): boolean {
@@ -71,7 +79,7 @@ export class WebDav {
     private readonly parseProp: DavParser,
     private readonly timeout = 90_000,
   ) {
-    mailEndpoint(endpoint);
+    this.endpoint = webdavEndpoint(endpoint);
     if (!username.trim() || !password || /[:\r\n]/.test(username)) throw new SyncError('configuration');
     const bytes = new Uint8Array(encode(username + ':' + password));
     this.authorization = 'Basic ' + btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join(''));
@@ -88,7 +96,7 @@ export class WebDav {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_resolve, reject) => {
       // Use the current host's timer API: a window in Obsidian and Node in the HTTP fixture.
-      timer = globalThis.setTimeout(() => reject(new SyncError(mutates ? 'uncertain' : 'timeout')), this.timeout);
+      timer = setTimeout(() => reject(new SyncError(mutates ? 'uncertain' : 'timeout')), this.timeout);
     });
     try {
       const result = await Promise.race([
@@ -102,7 +110,7 @@ export class WebDav {
       if (error instanceof SyncError) throw error;
       throw new SyncError(mutates ? 'uncertain' : 'network');
     } finally {
-      globalThis.clearTimeout(timer);
+      clearTimeout(timer);
     }
   }
 
