@@ -144,6 +144,46 @@ test('portable fields cover working Excalidraw versions and preserve secret, pat
   assert.deepEqual(preferences('custom-plugin', { color: 'blue', payload: { accessToken: 'synthetic' } }, ['color', 'payload']), { color: 'blue' });
 });
 
+test('Outliner 4.10.2 settings use persisted keys and keep release bookkeeping local', () => {
+  const values = {
+    styleLists: true, debug: false, stickCursor: 'bullet-and-checkbox', betterEnter: true,
+    betterVimO: true, betterTab: true, selectAll: true, listLines: false,
+    listLineAction: 'toggle-folding', dnd: true,
+  };
+  assert.deepEqual(preferences('obsidian-outliner', { ...values, previousRelease: '4.10.2', token: 'synthetic' }), values);
+  assert.deepEqual(preferences('obsidian-outliner', { drawVerticalLines: true, improveStyleOfLists: false }),
+    { drawVerticalLines: true, improveStyleOfLists: false });
+});
+
+test('identical existing Outliner installations exchange a new toggle in both directions', async () => {
+  const cloud = new Cloud();
+  const left = await client(a, cloud), right = await client(b, cloud);
+  const id = 'obsidian-outliner';
+  await install(left, id, '4.10.2', { listLines: false, listLineAction: 'toggle-folding', previousRelease: 'source' });
+  await install(right, id, '4.10.2', { listLines: false, listLineAction: 'toggle-folding', previousRelease: 'recipient' });
+  await left.sync.initialize(a); await left.sync.run([a, b]);
+  await right.sync.initialize(a); await right.sync.run([a, b]);
+  assert.equal(right.sync.rows[0]?.status, 'same');
+  await setting(left, id, { listLines: true });
+  await left.sync.run([a, b]); await right.sync.run([a, b]);
+  assert.equal(right.sync.rows[0]?.status, 'pending');
+  assert.equal((await right.files.rawSettings(id)).listLines, false);
+  await right.sync.run([a, b], true);
+  assert.equal((await right.files.rawSettings(id)).listLines, true);
+  await setting(right, id, { listLines: false });
+  await right.sync.run([a, b]); await left.sync.run([a, b]);
+  assert.equal(left.sync.rows[0]?.status, 'pending');
+  await left.sync.run([a, b], true);
+  assert.equal((await left.files.rawSettings(id)).listLines, false);
+  assert.equal((await left.files.rawSettings(id)).previousRelease, 'source');
+  assert.equal((await right.files.rawSettings(id)).previousRelease, 'recipient');
+  const writes = cloud.writes.length;
+  await left.sync.run([a, b]); await right.sync.run([a, b]);
+  assert.equal(cloud.writes.length, writes);
+  assert.equal(left.sync.rows[0]?.status, 'same');
+  assert.equal(right.sync.rows[0]?.status, 'same');
+});
+
 test('profile signing keys respect native secret ID limits, retain identity and isolate vault/device scopes', async () => {
   const secrets = new Map<string, string>();
   const storage = {

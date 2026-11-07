@@ -6,7 +6,8 @@ const fields: Record<string, string> = {
   dataview: 'renderNullAs taskCompletionTracking taskCompletionUseEmojiShorthand taskCompletionText taskCompletionDateFormat recursiveSubTaskCompletion warnOnEmptyResult refreshEnabled refreshInterval defaultDateFormat defaultDateTimeFormat maxRecursiveRenderDepth tableIdColumnName tableGroupColumnName showResultCount inlineQueryPrefix inlineJsQueryPrefix inlineQueriesInCodeblocks enableInlineDataview prettyRenderInlineFieldsInLivePreview prettyRenderInlineFields dataviewJsKeyword',
   'obsidian-auto-link-title': 'shouldReplaceText shouldUseBetterLink shouldNotReplaceTitle shouldFetchTitleOnPaste shouldFetchTitleOnInsert shouldFetchTitleOnDrop useBetterLink titleCase excludedDomains',
   'obsidian-book-search-plugin': 'folder fileNameFormat frontmatter content useDefaultFrontmatter defaultFrontmatterKeyType templateFile serviceProvider localePreference openPageOnCompletion showCoverImageInSearch enableCoverImageSave enableCoverImageEdgeCurl coverImagePath askForLocale',
-  'obsidian-outliner': 'stickCursorIntoTheContent stickCursorOutOfTheContent betterLists improveStyleOfLists drawVerticalLines verticalLineClickAction dragAndDrop debugMode',
+  'obsidian-outliner': `styleLists debug stickCursor betterEnter betterVimO betterTab selectAll listLines listLineAction dnd
+    stickCursorIntoTheContent stickCursorOutOfTheContent betterLists improveStyleOfLists drawVerticalLines verticalLineClickAction dragAndDrop debugMode`,
   'obsidian-zotero-desktop-connector': 'noteImportFolder pdfExportImageDPI pdfExportImageFormat pdfExportImageQuality citeFormats exportFormats citeSuggestTemplate openNoteAfterImport whichNotesToOpenAfterImport shouldConcat',
   'obsidian42-brat': 'notificationsEnabled selectLatestPluginVersionByDefault',
   'pdf-annotator': 'annotationMarkdownSettings defaultDarkMode useDarkModeDark defaultReadingMode',
