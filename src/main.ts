@@ -10,7 +10,7 @@ import { options, prefixes, type Options } from './settings';
 import { formatSyncAge } from './sync-age';
 import { SyncFeedback } from './sync-feedback';
 import { SettingsTab, showHistory, showPlan, showInventory, showMarkdownConflicts, notifyMarkdownConflicts } from './ui';
-import { collectionResponse, MAIL, webdavEndpoint, WebDav, type Transport } from './webdav';
+import { MAIL, webdavEndpoint, WebDav, type Transport } from './webdav';
 import { PluginFiles, type PluginRuntime } from './plugin-disk';
 import { loadSigningKey } from './plugin-profile';
 import { PluginSync } from './plugin-sync';
@@ -51,6 +51,7 @@ export default class TotalSync extends Plugin {
   private retryTimer?: Timer;
   private retryAt = 0;
   private retryCount = 0;
+  private lastMoveRecheck = 0;
   private changedWhileWorking = false;
   private feedback?: SyncFeedback;
   private syncController?: AbortController;
@@ -216,7 +217,7 @@ export default class TotalSync extends Plugin {
 
   private dav(endpoint: string, credential: Credential): WebDav {
     return new WebDav(webdavEndpoint(endpoint), credential.login, credential.password, request,
-      (text, url) => collectionResponse(new DOMParser().parseFromString(text, 'application/xml'), url));
+      text => new DOMParser().parseFromString(text, 'application/xml'));
   }
 
   private credential(endpoint: string, login: string, password: string): Credential {
@@ -281,6 +282,7 @@ export default class TotalSync extends Plugin {
       this.pluginService = undefined;
       this.pluginServiceKey = '';
       this.pluginWatchStamp = '';
+      this.lastMoveRecheck = 0;
       this.changedWhileWorking = false;
       this.state = newState();
       this.stateError = false;
@@ -407,6 +409,25 @@ export default class TotalSync extends Plugin {
     this.retryTimer = undefined;
     this.retryAt = 0;
     this.queued = this.debounceTimer !== undefined;
+  }
+
+  private async recheckExclusiveMove(signal: AbortSignal): Promise<boolean> {
+    const now = Date.now();
+    if (this.config.exclusiveMove || signal.aborted || !this.allowed() || now - this.lastMoveRecheck < 5 * 60_000) return false;
+    const credential = this.credentials();
+    if (!credential) return false;
+    this.lastMoveRecheck = now;
+    try {
+      const result = await RemoteVault.probe(this.dav(this.config.endpoint, credential));
+      if (!result.exclusiveMove || signal.aborted || !this.allowed()) return false;
+      this.update({ exclusiveMove: true });
+      this.record('probe-exclusive-move');
+      return true;
+    } catch (error) {
+      const failure = error instanceof SyncError ? error : new SyncError('local');
+      this.record('probe-' + failure.code, failure.status, failure.phase);
+      return false;
+    }
   }
 
   private retryAfterFailure(code: SyncError['code']): void {
@@ -634,14 +655,22 @@ export default class TotalSync extends Plugin {
     this.syncController = controller;
     this.feedback?.start();
     const outcome = await this.operate(async () => {
-      const result = await this.engine(undefined, {
+      const controls = {
         signal: controller.signal,
-        progress: (completed, total) => this.feedback?.progress(completed, total),
-      }).run(this.state, approval);
-      // Note checkpoints are durable even if the separate plugin operation subsequently fails.
-      await this.saveData({ endpoint: this.config.endpoint, binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess: this.lastSuccess });
-      this.state = result.state;
-      this.devices = result.devices;
+        progress: (completed: number, total: number) => this.feedback?.progress(completed, total),
+      };
+      const runNotes = async () => {
+        const result = await this.engine(undefined, controls).run(this.state, approval);
+        // Keep downloaded changes durable if the second pass or plugin sync fails.
+        await this.saveData({ endpoint: this.config.endpoint, binding: this.config.binding, device: this.config.device, state: result.state, lastSuccess: this.lastSuccess });
+        this.state = result.state;
+        this.devices = result.devices;
+        return result;
+      };
+      let result = await runNotes();
+      if (result.errors.includes('cloud-lock') && await this.recheckExclusiveMove(controller.signal)) {
+        result = await runNotes();
+      }
       // A separate plugin-profile error must not hide a retryable note-sync error.
       if (!controller.signal.aborted) for (const code of result.errors) this.retryAfterFailure(code);
       if (this.profile === 'windows' && this.config.plugins) {

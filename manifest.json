@@ -1,7 +1,7 @@
 {
   "id": "total-sync",
   "name": "TotalSync",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "minAppVersion": "1.11.5",
   "description": "Sync your notes, files and settings across devices with your own WebDAV server.",
   "author": "jesterspot1-svg",

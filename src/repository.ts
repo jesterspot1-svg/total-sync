@@ -5,6 +5,8 @@ import {
 import { emptyManifest, validateManifest } from './manifest';
 import { ROOT, WebDav } from './webdav';
 
+const abandonedIntentAge = 10 * 60_000;
+
 export interface Head extends Checkpoint {
   manifest: Manifest;
   pending?: boolean;
@@ -197,6 +199,12 @@ export class RemoteVault {
   }
 
   async recoverLegacy(known: Checkpoint | null, check: () => void): Promise<boolean> {
+    const recovered = await this.recoverOwnIntent(known, check);
+    if (recovered || !this.exclusiveMove) return recovered;
+    return this.recoverAbandonedIntent(known, check);
+  }
+
+  private async recoverOwnIntent(known: Checkpoint | null, check: () => void): Promise<boolean> {
     const intent = this.pendingIntent();
     if (!intent) return false;
     check();
@@ -218,10 +226,23 @@ export class RemoteVault {
     if (latest.revision >= intent.revision) {
       if (latest.revision > intent.revision && !await this.committed(intent.revision)) throw new SyncError('integrity');
       const published = latest.revision === intent.revision ? latest : await this.read(intent.revision);
-      if (published.hash !== intent.hash) throw new SyncError('integrity', undefined, 'revision-index');
+      if (published.hash !== intent.hash) {
+        // A verified atomic publication can win the same revision while this device is offline.
+        // Keep its revision and let the sync engine plan the local changes against it.
+        if (published.manifest.parent !== intent.parent || !await this.readyMatches(published)) {
+          throw new SyncError('integrity', undefined, 'revision-index');
+        }
+        await this.releaseLock(lock);
+        return false;
+      }
     } else {
       if (latest.revision !== intent.revision - 1 || latest.hash !== intent.parent) throw new SyncError('integrity');
       check();
+      if (latest.pending && await this.storedIndex(this.reservation(intent.revision) + '/ready')) {
+        await this.finishPrepared(latest);
+        await this.releaseLock(lock);
+        return true;
+      }
       if (!latest.pending && !await this.createOwnedCollection(this.reservation(intent.revision), 'revision-reserve')) {
         throw new SyncError('cloud-advanced');
       }
@@ -229,15 +250,73 @@ export class RemoteVault {
       const saved = await this.storedIndex(path);
       if (saved && await sha256(saved) !== intent.hash) throw new SyncError('integrity', undefined, 'revision-index');
       if (!saved) {
-        if (latest.pending && await this.storedIndex(this.reservation(intent.revision) + '/ready')) {
-          throw new SyncError('cloud-preparing');
-        }
         await this.storeIndex(path, bytes, intent.hash);
       }
       if (!await this.committed(intent.revision)) await this.publishMarker(intent.revision, intent.hash);
     }
     await this.releaseLock(lock);
     return true;
+  }
+
+  private async recoverAbandonedIntent(known: Checkpoint | null, check: () => void): Promise<boolean> {
+    check();
+    const lock = this.meta + '/lock';
+    const children = await this.dav.children(lock);
+    if (children?.length !== 1) return false;
+    const entry = children[0]!;
+    const token = /^intent-(.+)\.json$/.exec(entry.name)?.[1];
+    const time = this.dav.serverTime;
+    if (!token || !idPattern.test(token) || entry.collection || time === null || !Number.isFinite(entry.modified)
+      || time - entry.modified < abandonedIntentAge) return false;
+    const bytes = await this.storedIndex(lock + '/' + entry.name);
+    if (!bytes) return false;
+    const head = await this.head(known, true, check);
+    if (head.pending) return false;
+    let manifest: Manifest;
+    try {
+      manifest = validateManifest(bytes, this.id);
+    } catch (error) {
+      // An unreadable draft on the unused legacy path cannot replace the published head.
+      if (error instanceof SyncError && (error.code === 'integrity' || error.code === 'size')) return false;
+      throw error;
+    }
+    if (manifest.revision !== head.revision + 1 || manifest.parent !== head.hash) return false;
+
+    await this.verifyIntentFiles(head.manifest, manifest, check);
+    check();
+    try {
+      // An exclusive MOVE races safely with MKCOL from a legacy writer resuming the same revision.
+      // Never delete or rename the shared lock path from a different device.
+      await this.publishPrepared(head, bytes, await sha256(bytes));
+    } catch (error) {
+      if (error instanceof SyncError && error.code === 'cloud-advanced') return false;
+      throw error;
+    }
+    return true;
+  }
+
+  private async verifyIntentFiles(previous: Manifest, next: Manifest, check: () => void): Promise<void> {
+    const key = (channel: Channel, file: RemoteFile) => channel + '/' + file.blob + '/' + file.hash + '/' + file.size;
+    const verified = new Set<string>();
+    for (const channel of channels) {
+      for (const file of Object.values(previous.files[channel])) {
+        if (file.kind === 'file') verified.add(key(channel, file));
+      }
+    }
+    for (const item of previous.history) verified.add(key(item.channel, item.file));
+    const verify = async (channel: Channel, file: RemoteFile) => {
+      const id = key(channel, file);
+      if (verified.has(id)) return;
+      check();
+      await this.download(channel, file);
+      verified.add(id);
+    };
+    for (const channel of channels) {
+      for (const file of Object.values(next.files[channel])) {
+        if (file.kind === 'file') await verify(channel, file);
+      }
+    }
+    for (const item of next.history) await verify(item.channel, item.file);
   }
 
   private committed(revision: number): Promise<boolean> {
@@ -454,6 +533,11 @@ export class RemoteVault {
       if (!await this.committed(revision)) throw new SyncError('cloud-preparing', error.status);
     }
     return prepared;
+  }
+
+  private async readyMatches(head: Head): Promise<boolean> {
+    const ready = await this.storedIndex(this.reservation(head.revision) + '/ready');
+    return ready?.byteLength === 64 && String.fromCharCode(...new Uint8Array(ready)) === head.hash;
   }
 
   async upload(channel: Channel, bytes: ArrayBuffer, hash: string, device: string, at: number): Promise<RemoteFile> {

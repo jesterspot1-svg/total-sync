@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.2
+
+- Recheck WebDAV support for exclusive collection MOVE when legacy cloud writes are blocked. If the server passes, retry sync with atomic revision publication.
+- Recover a legacy publication left before reservation by another device. Recovery checks the server timestamp, parent revision and newly referenced file hashes before publishing. The shared legacy lock stays in place.
+
 ## 0.3.1
 
 - Show the desktop success check for 3.5 seconds after a successful sync. The status bar then shows only the last sync time, and restoring that time on startup does not replay the check.

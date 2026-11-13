@@ -868,6 +868,87 @@ test('exclusive MOVE publishes phone edits while the old empty lock still exists
   assert.equal(server.folders.has('/' + lock), true);
 });
 
+test('another device verifies and publishes an abandoned intent before the legacy reservation', async t => {
+  const { a, server, id, remote } = await setup(t);
+  const journal = publicationJournal();
+  const phone = new Client(server, id, 'mobile', undefined, false, false, undefined, journal);
+  const writer = new Client(server, id, 'windows', undefined, true);
+  const meta = '/' + ROOT + '/vaults/' + id + '/metadata';
+  phone.local.put('Prepared on phone.md', 'Verified pending edit');
+  server.fault = (method, path) => method === 'MKCOL' && path === meta + '/revisions/1' ? { status: 504 } : undefined;
+  await assert.rejects(phone.run(), error => error instanceof SyncError && error.phase === 'revision-reserve');
+  assert.equal((await remote.head(null)).revision, 0);
+  const intent = [...server.files.keys()].find(path => path.startsWith(meta + '/lock/intent-'))!;
+  assert.ok(intent);
+  const blob = [...server.files.keys()].find(path => path.includes('/content/'))!;
+  const bytes = server.files.get(blob)!;
+  server.fault = undefined;
+
+  // Recently written intents are left to their originating device.
+  assert.equal(await new RemoteVault(server.dav(), id, true).recoverLegacy(null, () => {}), false);
+  server.clock += 11 * 60_000;
+  server.files.set(blob, encode('corrupted'));
+  await assert.rejects(writer.run(), fails('integrity'));
+  assert.equal((await remote.head(null)).revision, 0);
+  server.files.set(blob, bytes);
+
+  const result = await writer.run();
+  assert.equal(result.recoveredPublication, true);
+  assert.deepEqual(result.errors, []);
+  assert.equal(writer.local.text('Prepared on phone.md'), 'Verified pending edit');
+  assert.ok(server.folders.has(meta + '/lock'));
+  assert.ok(server.files.has(intent));
+  assert.equal(await sha256(server.files.get(meta + '/revisions/1/index.json')!), await sha256(server.files.get(intent)!));
+  assert.equal((await a.run()).counts.pull, 1);
+  assert.equal(a.local.text('Prepared on phone.md'), 'Verified pending edit');
+  const completed = await phone.run();
+  assert.equal(completed.recoveredPublication, true);
+  assert.deepEqual(completed.errors, []);
+  assert.equal(server.folders.has(meta + '/lock'), false);
+});
+
+test('exclusive recovery leaves a legacy reservation and its contents to the original writer', async t => {
+  const { server, id, remote } = await setup(t);
+  const writer = new Client(server, id, 'windows', undefined, false, false, undefined, publicationJournal());
+  const meta = '/' + ROOT + '/vaults/' + id + '/metadata';
+  const index = meta + '/revisions/1/index.json';
+  writer.local.put('Reserved.md', 'pending');
+  server.fault = (method, path) => method === 'PUT' && path === index ? { status: 504 } : undefined;
+  await assert.rejects(writer.run(), fails('uncertain'));
+  server.fault = undefined;
+  server.clock += 11 * 60_000;
+  const recovery = new RemoteVault(server.dav(), id, true);
+  assert.equal(await recovery.recoverLegacy(null, () => {}), false);
+  assert.equal((await remote.head(null, true)).pending, true);
+  assert.equal(server.files.has(index), false);
+  assert.equal(server.folders.has(meta + '/lock'), true);
+  assert.equal((await writer.run()).recoveredPublication, true);
+  assert.equal((await remote.head(null)).revision, 1);
+});
+
+test('a returning legacy writer replans when a different verified atomic revision won', async t => {
+  const { server, id, remote } = await setup(t);
+  const journal = publicationJournal();
+  const legacy = new Client(server, id, 'windows', undefined, false, false, undefined, journal);
+  const atomic = new Client(server, id, 'mobile', undefined, true);
+  const meta = '/' + ROOT + '/vaults/' + id + '/metadata';
+  legacy.local.put('Legacy.md', 'keep local edit');
+  server.fault = (method, path) => method === 'MKCOL' && path === meta + '/revisions/1' ? { status: 504 } : undefined;
+  await assert.rejects(legacy.run(), fails('uncertain'));
+  server.fault = undefined;
+  atomic.local.put('Winner.md', 'keep published edit');
+  assert.equal((await atomic.run()).counts.push, 1);
+  const winner = await remote.head(null);
+
+  const result = await legacy.run();
+  assert.deepEqual(result.errors, []);
+  assert.equal(legacy.local.text('Winner.md'), 'keep published edit');
+  assert.equal((await remote.head(winner)).revision, 2);
+  assert.equal(server.folders.has(meta + '/lock'), false);
+  assert.equal((await atomic.run()).counts.pull, 1);
+  assert.equal(atomic.local.text('Legacy.md'), 'keep local edit');
+});
+
 test('concurrent exclusive publishers replan and combine two appended lines in one note', async t => {
   const { server, id } = await setup(t);
   const a = new Client(server, id, 'windows', undefined, true);

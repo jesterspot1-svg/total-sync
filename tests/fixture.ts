@@ -4,7 +4,7 @@ import { DOMParser } from '@xmldom/xmldom';
 import { SyncEngine, type SyncControls } from '../src/engine';
 import { encode, newState, sha256, stamp, SyncError, type Channel, type LocalEntry, type LocalFiles, type Profile, type Scan, type Stamp, type SyncState } from '../src/model';
 import { RemoteVault, type LegacyJournal } from '../src/repository';
-import { collectionResponse, MAIL, WebDav, type Request } from '../src/webdav';
+import { MAIL, WebDav, type Request } from '../src/webdav';
 
 const auth = 'Basic ' + btoa('tester@example.com:synthetic-fixture');
 type Fault = (method: string, path: string) => { status: number; body?: string } | undefined;
@@ -13,6 +13,7 @@ export class DavServer {
   readonly folders = new Set<string>(['/']);
   readonly files = new Map<string, ArrayBuffer>();
   readonly requests: { method: string; path: string }[] = [];
+  readonly modified = new Map<string, number>();
   clock = Date.UTC(2026, 10, 5);
   fault?: Fault;
   afterMutation?: Fault;
@@ -40,10 +41,16 @@ export class DavServer {
       switch (method) {
         case 'PROPFIND':
           if (!this.folders.has(path)) return send(404);
-          if (request.headers.depth !== '0') return send(400);
-          return send(207, '<d:multistatus xmlns:d="DAV:"><d:response><d:href>' + path
-            + '</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>'
-            + '<d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>');
+          {
+            const row = (href: string, collection: boolean) => '<d:response><d:href>' + href
+              + '</d:href><d:propstat><d:prop><d:resourcetype>' + (collection ? '<d:collection/>' : '') + '</d:resourcetype>'
+              + (this.modified.has(href) ? '<d:getlastmodified>' + new Date(this.modified.get(href)!).toUTCString() + '</d:getlastmodified>' : '')
+              + '</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>';
+            const direct = (href: string) => href.startsWith(path + '/') && !href.slice(path.length + 1).includes('/');
+            const children = request.headers.depth === '1'
+              ? [...this.folders].filter(direct).map(href => row(href, true)).concat([...this.files.keys()].filter(direct).map(href => row(href, false))) : [];
+            return send(207, '<d:multistatus xmlns:d="DAV:">' + row(path, true) + children.join('') + '</d:multistatus>');
+          }
         case 'MKCOL':
           if (this.folders.has(path) || this.files.has(path)) return send(405);
           if (!this.folders.has(parent)) return send(409);
@@ -62,6 +69,7 @@ export class DavServer {
           for await (const chunk of request) chunks.push(chunk as Uint8Array);
           const data = Uint8Array.from(Buffer.concat(chunks)).buffer;
           this.files.set(path, data);
+          this.modified.set(path, this.clock);
           const reply = this.afterMutation?.(method, path);
           return send(reply?.status ?? 201, reply?.body);
         }
@@ -132,10 +140,9 @@ export class DavServer {
       });
       return { status: result.status, bytes: await result.arrayBuffer(), date: result.headers.get('date') ?? undefined };
     };
-    return new WebDav(endpoint, 'tester@example.com', 'synthetic-fixture', send, (value, url) => {
-      const document = new DOMParser({ onError: () => { throw new Error('Malformed XML'); } }).parseFromString(value, 'application/xml');
-      return collectionResponse(document as unknown as Document, url);
-    }, timeout);
+    return new WebDav(endpoint, 'tester@example.com', 'synthetic-fixture', send, value =>
+      new DOMParser({ onError: () => { throw new Error('Malformed XML'); } }).parseFromString(value, 'application/xml') as unknown as Document,
+    timeout);
   }
 }
 

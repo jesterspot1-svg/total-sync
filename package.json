@@ -1,6 +1,6 @@
 {
   "name": "total-sync",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "description": "Obsidian notes, files and settings sync through WebDAV",
   "license": "MIT",

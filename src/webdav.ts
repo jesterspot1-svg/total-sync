@@ -17,7 +17,8 @@ export interface Response {
   date?: string;
 }
 export type Transport = (request: Request) => Promise<Response>;
-export type DavParser = (text: string, url: string) => boolean;
+export type DavParser = (text: string) => Document;
+type Child = { name: string; modified: number; collection: boolean };
 
 export function webdavEndpoint(value: string): string {
   try {
@@ -32,30 +33,31 @@ export function webdavEndpoint(value: string): string {
   } catch { throw new SyncError('configuration'); }
 }
 
-export function collectionResponse(doc: Document, url: string): boolean {
+function davRows(doc: Document): Element[] {
   const root = doc.documentElement;
   if (root?.namespaceURI !== DAV || root.localName !== 'multistatus'
     || doc.getElementsByTagName('parsererror').length) throw new SyncError('protocol');
-  const rows = root.getElementsByTagNameNS(DAV, 'response');
-  const row = rows.item(0);
-  if (rows.length !== 1 || !row) throw new SyncError('protocol');
+  return Array.from(root.getElementsByTagNameNS(DAV, 'response'));
+}
+
+function responsePath(row: Element, url: string): string {
   const href = row.getElementsByTagNameNS(DAV, 'href').item(0)?.textContent;
   try {
-    const requested = new URL(url);
     const returned = new URL(href ?? '', url);
-    const clean = (path: string) => decodeURIComponent(path).replace(/\/$/, '');
-    if (!href || returned.origin !== requested.origin || returned.search || returned.hash
-      || clean(returned.pathname) !== clean(requested.pathname)) throw new Error();
+    if (!href || returned.origin !== new URL(url).origin || returned.search || returned.hash) throw new Error();
+    return decodeURIComponent(returned.pathname).replace(/\/$/, '');
   } catch {
     throw new SyncError('protocol');
   }
+}
+
+function property(row: Element, name: string): Element | undefined {
   for (const propstat of Array.from(row.getElementsByTagNameNS(DAV, 'propstat'))) {
-    if (/^HTTP\/\d(?:\.\d)?\s+200(?:\s|$)/.test(propstat.getElementsByTagNameNS(DAV, 'status').item(0)?.textContent?.trim() ?? '')
-      && propstat.getElementsByTagNameNS(DAV, 'resourcetype').item(0)?.getElementsByTagNameNS(DAV, 'collection').length) {
-      return true;
-    }
+    if (!/^HTTP\/\d(?:\.\d)?\s+200(?:\s|$)/.test(propstat.getElementsByTagNameNS(DAV, 'status').item(0)?.textContent?.trim() ?? '')) continue;
+    const value = propstat.getElementsByTagNameNS(DAV, name).item(0);
+    if (value) return value;
   }
-  throw new SyncError('protocol');
+  return undefined;
 }
 
 function statusError(status: number): SyncError {
@@ -114,20 +116,55 @@ export class WebDav {
     }
   }
 
-  async collection(path: string): Promise<boolean> {
+  private async properties(path: string, depth: '0' | '1'): Promise<Element[] | null> {
     const response = await this.call('PROPFIND', path, {
-      Depth: '0', 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'no-cache',
-    }, encode(propBody));
-    if (response.status === 404) return false;
+      Depth: depth, 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'no-cache',
+    }, encode(depth === '0' ? propBody : propBody.replace('</d:prop>', '<d:getlastmodified/></d:prop>')));
+    if (response.status === 404) return null;
+    if (depth === '1' && [400, 403, 405, 501].includes(response.status)) return null;
     if (response.status !== 207) throw statusError(response.status);
     if (response.bytes.byteLength > 256_000) throw new SyncError('protocol');
     try {
       const text = decode(response.bytes);
-      if (/<!\s*(?:DOCTYPE|ENTITY)/i.test(text) || !this.parseProp(text, this.url(path))) throw new Error();
+      if (/<!\s*(?:DOCTYPE|ENTITY)/i.test(text)) throw new Error();
+      return davRows(this.parseProp(text));
     } catch {
       throw new SyncError('protocol');
     }
+  }
+
+  async collection(path: string): Promise<boolean> {
+    const rows = await this.properties(path, '0');
+    if (!rows) return false;
+    const url = this.url(path);
+    const row = rows[0];
+    if (rows.length !== 1 || !row || responsePath(row, url) !== decodeURIComponent(new URL(url).pathname).replace(/\/$/, '')
+      || !property(row, 'resourcetype')?.getElementsByTagNameNS(DAV, 'collection').length) throw new SyncError('protocol');
     return true;
+  }
+
+  async children(path: string): Promise<Child[] | null> {
+    const rows = await this.properties(path, '1');
+    if (!rows) return null;
+    const url = this.url(path);
+    const parent = decodeURIComponent(new URL(url).pathname).replace(/\/$/, '');
+    const children: Child[] = [];
+    let rootSeen = false;
+    for (const row of rows) {
+      const href = responsePath(row, url);
+      const type = property(row, 'resourcetype');
+      if (!type) return null;
+      const collection = type.getElementsByTagNameNS(DAV, 'collection').length > 0;
+      if (href === parent) {
+        if (!collection || rootSeen) return null;
+        rootSeen = true;
+        continue;
+      }
+      const name = href.slice(parent.length + 1);
+      if (!href.startsWith(parent + '/') || !name || name.includes('/')) return null;
+      children.push({ name, collection, modified: Date.parse(property(row, 'getlastmodified')?.textContent ?? '') });
+    }
+    return rootSeen ? children : null;
   }
 
   async mkdir(path: string): Promise<boolean> {
